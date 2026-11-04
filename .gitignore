@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Title Search Platform — Root .gitignore
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Environment files — NEVER commit secrets
+.env
+.env.local
+.env.*.local
+**/.env
+*.env
+
+# Local storage, scratch files, and reference dumps
+storage/
+scratch/
+tmp/
+dono-mvp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+.venv/
+venv/
+env/
+
+# Alembic
+# (keep versions/ tracked — migrations are code)
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Playwright
+playwright-report/
+test-results/
+
