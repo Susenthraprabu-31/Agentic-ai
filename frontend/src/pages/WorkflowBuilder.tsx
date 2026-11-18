@@ -60,8 +60,8 @@ const DUAL_BRANCH_PRESET: WorkflowDefinition = {
       position: { x: 80, y: 180 },
       data: {
         label: "Property Search Input",
-        required_params: ["parcel_id"],
-        optional_params: ["address", "owner_name"],
+        required_params: [],
+        optional_params: ["parcel_id", "address", "owner_name"],
       },
     },
     {
@@ -129,8 +129,8 @@ const ASSESSOR_ONLY_PRESET: WorkflowDefinition = {
       position: { x: 100, y: 180 },
       data: {
         label: "Property Search Input",
-        required_params: ["parcel_id"],
-        optional_params: ["address"],
+        required_params: [],
+        optional_params: ["parcel_id", "address", "owner_name"],
       },
     },
     {
@@ -166,8 +166,8 @@ const TAX_ONLY_PRESET: WorkflowDefinition = {
       position: { x: 100, y: 180 },
       data: {
         label: "Property Search Input",
-        required_params: ["parcel_id"],
-        optional_params: ["owner_name"],
+        required_params: [],
+        optional_params: ["parcel_id", "address", "owner_name"],
       },
     },
     {
@@ -314,8 +314,8 @@ export default function WorkflowBuilder() {
     if (type === "input") {
       initialData = {
         label: "Property Search Input",
-        required_params: ["parcel_id"],
-        optional_params: ["address"],
+        required_params: [],
+        optional_params: ["parcel_id", "address", "owner_name"],
       };
     } else if (type === "assessor") {
       initialData = {
@@ -601,14 +601,25 @@ export default function WorkflowBuilder() {
   const handleExecuteWorkflow = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentWorkflow) return;
+
+    const parcelId = execParcelId.trim();
+    const address = execAddress.trim();
+    const ownerName = execOwnerName.trim();
+    if (!parcelId && !address && !ownerName) {
+      setErrorMsg(
+        "Enter at least one search criterion: Parcel ID, Property Address, or Owner Name."
+      );
+      return;
+    }
+
     setIsSubmittingExec(true);
     setErrorMsg(null);
     try {
       const run = await executionsApi.executeWorkflow(currentWorkflow.id, {
         input_data: {
-          parcel_id: execParcelId.trim(),
-          address: execAddress.trim(),
-          owner_name: execOwnerName.trim(),
+          parcel_id: parcelId,
+          address,
+          owner_name: ownerName,
           simulate_delinquent: execSimulateDelinquent,
           fail_tax: execFailTax,
         },
@@ -970,20 +981,30 @@ export default function WorkflowBuilder() {
               {selectedNode.type === "input" && (
                 <div className="space-y-2">
                   <Label className="text-[11px] font-semibold text-slate-600">
-                    Required Search Parameters
+                    Supported Search Parameters
                   </Label>
                   <Input
-                    value={(selectedNode.data.required_params || []).join(", ")}
+                    value={(
+                      selectedNode.data.optional_params || [
+                        "parcel_id",
+                        "address",
+                        "owner_name",
+                      ]
+                    ).join(", ")}
                     onChange={(e) =>
                       updateSelectedNodeData({
-                        required_params: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                        required_params: [],
+                        optional_params: e.target.value
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean),
                       })
                     }
-                    placeholder="parcel_id, address"
+                    placeholder="parcel_id, address, owner_name"
                     className="h-7 text-xs"
                   />
                   <span className="text-[10px] text-muted-foreground">
-                    Comma separated parameters required from API clients.
+                    Comma separated. Executions need at least one value filled in.
                   </span>
                 </div>
               )}
@@ -1221,10 +1242,20 @@ export default function WorkflowBuilder() {
             </div>
 
             <form onSubmit={handleExecuteWorkflow} className="space-y-3.5 text-xs">
+              <p className="text-[11px] text-slate-600 bg-blue-50 border border-blue-100 rounded-md px-2.5 py-2">
+                Use the search type your county supports — provide at least one of Parcel ID,
+                Property Address, or Owner Name.
+              </p>
+
+              {errorMsg && (
+                <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-md px-2.5 py-2">
+                  {errorMsg}
+                </p>
+              )}
+
               <div>
-                <Label className="text-xs font-semibold text-slate-700">Parcel ID *</Label>
+                <Label className="text-xs font-semibold text-slate-700">Parcel ID</Label>
                 <Input
-                  required
                   placeholder="e.g. 01-002-0034"
                   value={execParcelId}
                   onChange={(e) => setExecParcelId(e.target.value)}

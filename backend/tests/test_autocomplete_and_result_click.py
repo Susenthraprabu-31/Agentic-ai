@@ -1,5 +1,43 @@
+import re
+
 import pytest
+from app.browser.result_selector_ai import ai_indicates_no_matching_result
 from app.extraction.florida_extractors import parse_dynamic_full_page_record
+
+
+def test_ai_indicates_no_matching_result_detects_llm_rejection():
+    ai_data = {
+        "is_results_page": False,
+        "click_selector": "",
+        "description": "No matching property result was found.",
+        "reasoning": "Rows show other addresses, not 2701 Bee Branch Lakes Dr.",
+    }
+    assert ai_indicates_no_matching_result(ai_data)
+
+
+def test_is_whole_results_row_selector_detects_tr_clicks():
+    from app.browser.property_capture_prep import is_whole_results_row_selector
+
+    assert is_whole_results_row_selector("table tbody tr:nth-of-type(1)")
+    assert not is_whole_results_row_selector('table tbody tr td a:has-text("13763 EXOTICA LN")')
+    assert is_whole_results_row_selector('button:has-text("QV")')
+
+
+def test_search_results_listing_pattern():
+    from app.browser.property_capture_prep import SEARCH_RESULTS_LISTING
+
+    body = "PROPERTY SEARCH RESULTS\nOWNER NAME\tSITE ADDRESS\nGARZA\t277 ONEIDA TER\nQV MAP"
+    assert SEARCH_RESULTS_LISTING.search(body)
+    assert "qv" in body.lower()
+
+
+def test_ai_indicates_no_matching_result_allows_valid_click_plan():
+    ai_data = {
+        "is_results_page": True,
+        "click_selector": "td.link:has-text('12345')",
+        "description": "Click parcel 12345",
+    }
+    assert not ai_indicates_no_matching_result(ai_data)
 
 def test_parse_dynamic_full_page_record_handles_knockout_and_hillsborough():
     data = {
@@ -84,5 +122,22 @@ def test_is_genuine_property_identity_accepts_authentic_property_records():
         "property_address": "24324 SW 118 CT, HOMESTEAD, FL 33032",
         "parcel_number": "30-6924-001-0030"
     }, current_url="https://county-taxes.net/fl-miamidade/property-tax")
+
+
+def test_parcel_search_text_variants_florida_groups():
+    from app.browser.property_capture_prep import parcel_search_text_variants
+
+    v = parcel_search_text_variants("10-05-12-0000-0000-00800")
+    assert "10-05-12-0000-0000-00800" in v
+    assert "10-05-12 0000-0000-00800" in v
+    assert any(len(re.sub(r"\D", "", x)) >= 16 for x in v)
+
+
+def test_score_row_matches_parcel_digits_in_cell():
+    from app.browser.result_selector_ai import _query_match_tokens, _score_row_against_query
+
+    tokens = _query_match_tokens("10-05-12-0000-0000-00800", "parcel")
+    row = "1 10-05-12 0000-0000-00800 (TIMBERLAND) HAMLIN LARRY NE HOWARD"
+    assert _score_row_against_query(row, tokens) >= 0.5
 
 

@@ -1,4 +1,15 @@
 import { apiClient } from "./client";
+
+function triggerBrowserFileDownload(blob: Blob, filename: string): void {
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(url);
+}
 import type {
   BrowserActivityResponse,
   BrowserSession,
@@ -47,6 +58,25 @@ export const executionsApi = {
   async getDocuments(runId: string): Promise<DocumentArtifact[]> {
     const res = await apiClient.get<DocumentArtifact[]>(`/executions/${runId}/documents`);
     return res.data;
+  },
+
+  /** Download all execution documents as a single ZIP archive */
+  async downloadAllDocuments(runId: string): Promise<void> {
+    const res = await apiClient.get(`/executions/${runId}/documents/download-all`, {
+      responseType: "blob",
+      timeout: 300_000,
+    });
+    const disposition =
+      res.headers && typeof res.headers["content-disposition"] === "string"
+        ? res.headers["content-disposition"]
+        : "";
+    let filename = `retrieved_documents_${runId.slice(0, 8)}.zip`;
+    const match = /filename="?([^";\n]+)"?/i.exec(disposition);
+    if (match?.[1]) {
+      filename = match[1];
+    }
+    const blob = new Blob([res.data], { type: "application/zip" });
+    triggerBrowserFileDownload(blob, filename);
   },
 
   /** Trigger background workflow execution (returns 202 Accepted) */

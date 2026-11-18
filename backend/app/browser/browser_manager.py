@@ -22,6 +22,25 @@ DEFAULT_USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Native window.print() blocks headed Chromium (print preview modal); automation uses page.pdf() instead.
+SUPPRESS_NATIVE_PRINT_INIT = """() => {
+  const blockPrint = function() {};
+  const lockPrint = () => {
+    try { window.print = blockPrint; } catch (_) {}
+    try {
+      Object.defineProperty(window, 'print', {
+        value: blockPrint,
+        writable: true,
+        configurable: true,
+      });
+    } catch (_) {}
+  };
+  lockPrint();
+  try { document.addEventListener('DOMContentLoaded', lockPrint, { once: true }); } catch (_) {}
+  try { window.addEventListener('load', lockPrint, { once: true }); } catch (_) {}
+  try { setInterval(lockPrint, 250); } catch (_) {}
+}"""
+
 
 def check_display_available() -> tuple[bool, str | None]:
     """
@@ -70,6 +89,7 @@ class BrowserManager:
         self._browser: Browser | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock: asyncio.Lock | None = None
+        self._isolated_context_lock: asyncio.Lock | None = None
 
         # Resilience & Lifecycle State
         self._state: BrowserLifecycleState = BrowserLifecycleState.CLOSED
@@ -87,6 +107,13 @@ class BrowserManager:
         if self._lock is None or self._loop != current_loop:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _get_isolated_context_lock(self) -> asyncio.Lock:
+        """Serializes full browser context lifetimes (assessor + tax cannot share concurrent Playwright access)."""
+        current_loop = asyncio.get_running_loop()
+        if self._isolated_context_lock is None or self._loop != current_loop:
+            self._isolated_context_lock = asyncio.Lock()
+        return self._isolated_context_lock
 
     @classmethod
     async def get_instance(cls) -> "BrowserManager":
@@ -227,6 +254,8 @@ class BrowserManager:
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-print-preview",
+                    "--disable-features=PrintPreview",
                 ]
                 if is_visible_mode:
                     launch_args.extend(["--start-maximized", "--window-size=1280,800"])
@@ -263,6 +292,21 @@ class BrowserManager:
         logger.warning("Initiating browser recovery. Reason: %s", reason)
         lock = self._get_lock()
         async with lock:
+            if self._active_contexts_count > 0:
+                logger.warning(
+                    "Skipping destructive browser recovery while %d isolated context(s) are active (%s)",
+                    self._active_contexts_count,
+                    reason,
+                )
+                if self._browser is not None and self._browser.is_connected():
+                    return self._browser
+                # Another node may still be closing its context; brief wait then re-check.
+                for _ in range(6):
+                    await asyncio.sleep(0.5)
+                    if self._active_contexts_count == 0 and self._browser is not None and self._browser.is_connected():
+                        return self._browser
+                    if self._active_contexts_count == 0:
+                        break
             if self._current_session_id:
                 await self._session_service.update_state(
                     self._current_session_id,
@@ -312,6 +356,25 @@ class BrowserManager:
         Creates an isolated browser context for a workflow step or search.
         Enforces worker context limits, tracks session health, and guarantees timeout-bounded cleanup.
         """
+        async with self._get_isolated_context_lock():
+            async with self._new_isolated_context_locked(
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
+                locale=locale,
+                timezone_id=timezone_id,
+                workflow_run_id=workflow_run_id,
+            ) as ctx_page:
+                yield ctx_page
+
+    @asynccontextmanager
+    async def _new_isolated_context_locked(
+        self,
+        viewport_width: int = 1280,
+        viewport_height: int = 800,
+        locale: str = "en-US",
+        timezone_id: str = "America/New_York",
+        workflow_run_id: uuid.UUID | str | None = None,
+    ) -> AsyncGenerator[tuple[BrowserContext, Page], None]:
         effective_wf_id = None
         if workflow_run_id:
             try:
@@ -346,11 +409,21 @@ class BrowserManager:
                 locale=locale,
                 timezone_id=timezone_id,
                 ignore_https_errors=True,
-                accept_downloads=False,
+                accept_downloads=True,
             )
 
             context.set_default_navigation_timeout(settings.BROWSER_NAVIGATION_TIMEOUT_MS)
             context.set_default_timeout(settings.PLAYWRIGHT_ACTION_TIMEOUT_MS)
+            try:
+                await context.add_init_script(SUPPRESS_NATIVE_PRINT_INIT)
+            except Exception as init_err:
+                logger.debug("Print suppression init script note: %s", init_err)
+            try:
+                from app.browser.property_capture_prep import install_print_route_guards
+
+                await install_print_route_guards(context)
+            except Exception as guard_err:
+                logger.debug("Print route guard note: %s", guard_err)
 
             # Route interceptor to protect Playwright evaluation from portal scripts that declare lexical `let Map`
             import re

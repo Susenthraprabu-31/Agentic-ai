@@ -51,7 +51,7 @@ def normalize_florida_parcel(parcel: str, county: Optional[str] = None) -> str:
 def normalize_florida_pa_parcel(parcel: str) -> str:
     """Format parcel for floridapa.com / custom PA GIS."""
     stripped = parcel.strip()
-    if re.match(r"^\d{2}-\d{2}-\d{2}-\d{5}-\d{3}$", stripped):
+    if re.match(r"^\d{2}-\d{2}-\d{2}-\d{5}-\d{3}(-\d{4}){0,2}$", stripped):
         return stripped
     if re.match(r"^\d{5}-\d-\d{5}$", stripped):
         return stripped

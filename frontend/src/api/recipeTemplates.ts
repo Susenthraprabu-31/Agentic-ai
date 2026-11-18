@@ -16,13 +16,42 @@ export const recipeTemplatesApi = {
     search?: string;
     pattern_type?: string;
     status?: string;
+    page?: number;
+    size?: number;
     skip?: number;
     limit?: number;
   }): Promise<PaginatedResponse<UITemplate>> {
+    const page = params?.page ?? (params?.skip != null ? Math.floor(params.skip / (params.limit || 20)) + 1 : 1);
+    const size = params?.size ?? params?.limit ?? 20;
     const response = await apiClient.get<PaginatedResponse<UITemplate>>('/recipe-templates', {
-      params,
+      params: {
+        search: params?.search,
+        pattern_type: params?.pattern_type,
+        status: params?.status,
+        page,
+        size,
+      },
     });
     return response.data;
+  },
+
+  async getAllTemplates(params?: {
+    search?: string;
+    pattern_type?: string;
+    status?: string;
+  }): Promise<PaginatedResponse<UITemplate>> {
+    const size = 100;
+    let page = 1;
+    let items: UITemplate[] = [];
+    let total = 0;
+    while (true) {
+      const res = await this.getTemplates({ ...params, page, size });
+      items = items.concat(res.items || []);
+      total = res.total ?? items.length;
+      if (items.length >= total || (res.items || []).length < size) break;
+      page += 1;
+    }
+    return { items, total, page: 1, size: items.length };
   },
 
   async getTemplate(id: string): Promise<UITemplate> {
@@ -82,13 +111,44 @@ export const recipeTemplatesApi = {
     record_type?: string;
     status?: string;
     search?: string;
+    page?: number;
+    size?: number;
     skip?: number;
     limit?: number;
   }): Promise<PaginatedResponse<Recipe>> {
+    const page = params?.page ?? (params?.skip != null ? Math.floor(params.skip / (params.limit || 20)) + 1 : 1);
+    const size = params?.size ?? params?.limit ?? 20;
     const response = await apiClient.get<PaginatedResponse<Recipe>>('/recipes', {
-      params,
+      params: {
+        county_source_id: params?.county_source_id,
+        record_type: params?.record_type,
+        status: params?.status,
+        search: params?.search,
+        page,
+        size,
+      },
     });
     return response.data;
+  },
+
+  async getAllRecipes(params?: {
+    county_source_id?: string;
+    record_type?: string;
+    status?: string;
+    search?: string;
+  }): Promise<PaginatedResponse<Recipe>> {
+    const size = 100;
+    let page = 1;
+    let items: Recipe[] = [];
+    let total = 0;
+    while (true) {
+      const res = await this.getRecipes({ ...params, page, size });
+      items = items.concat(res.items || []);
+      total = res.total ?? items.length;
+      if (items.length >= total || (res.items || []).length < size) break;
+      page += 1;
+    }
+    return { items, total, page: 1, size: items.length };
   },
 
   async getRecipe(id: string): Promise<Recipe> {

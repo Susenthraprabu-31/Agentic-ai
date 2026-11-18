@@ -3,9 +3,21 @@ import { Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { WorkflowNodeData } from "@/types";
 
+const SEARCH_PARAM_LABELS: Record<string, string> = {
+  parcel_id: "Parcel ID",
+  address: "Address",
+  owner_name: "Owner",
+};
+
 export function InputNode({ data, selected }: NodeProps<WorkflowNodeData>) {
-  const req = data.required_params || ["parcel_id"];
-  const opt = data.optional_params || [];
+  const configured = [
+    ...(data.required_params || []),
+    ...(data.optional_params || []),
+  ];
+  const searchParams =
+    configured.length > 0
+      ? [...new Set(configured)]
+      : ["parcel_id", "address", "owner_name"];
 
   return (
     <div
@@ -21,16 +33,11 @@ export function InputNode({ data, selected }: NodeProps<WorkflowNodeData>) {
       </div>
 
       <div className="p-3 text-[11px] space-y-1.5 bg-white rounded-b-md">
-        <div className="text-muted-foreground font-medium">Search Parameters:</div>
+        <div className="text-muted-foreground font-medium">Search (any one):</div>
         <div className="flex flex-wrap gap-1">
-          {req.map((p) => (
-            <Badge key={p} className="bg-blue-600 text-white text-[10px] px-1.5 py-0">
-              *{p}
-            </Badge>
-          ))}
-          {opt.map((p) => (
-            <Badge key={p} variant="outline" className="text-[10px] px-1.5 py-0 text-slate-600">
-              {p}
+          {searchParams.map((p) => (
+            <Badge key={p} variant="outline" className="text-[10px] px-1.5 py-0 text-slate-700">
+              {SEARCH_PARAM_LABELS[p] ?? p}
             </Badge>
           ))}
         </div>

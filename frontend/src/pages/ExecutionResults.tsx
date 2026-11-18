@@ -32,6 +32,7 @@ import {
   Loader2,
   MinusCircle,
   MonitorPlay,
+  Printer,
   Receipt,
   RefreshCw,
   RotateCcw,
@@ -42,7 +43,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { executionsApi } from "@/api/executions";
-import { documentsApi, type DocumentOcrAnalysisResult } from "@/api/documents";
+import { documentsApi, extractApiErrorMessage, type DocumentOcrAnalysisResult } from "@/api/documents";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -114,6 +115,8 @@ function documentStatusBadge(status: string, isDuplicate = false) {
   switch (s) {
     case "validated":
       return <Badge className="bg-emerald-600 text-white text-[10px]">Validated PDF</Badge>;
+    case "completed":
+      return <Badge className="bg-emerald-600 text-white text-[10px]">Completed</Badge>;
     case "failed":
       return <Badge variant="destructive" className="text-[10px]">Failed</Badge>;
     case "downloading":
@@ -251,6 +254,59 @@ function getField(obj: any, ...keys: string[]): any {
     }
   }
   return null;
+}
+
+const ASSESSOR_IDENTITY_KEYS = [
+  "parcel_number",
+  "parcel_id",
+  "owner_name",
+  "property_address",
+  "legal_description",
+  "assessed_value",
+  "just_value",
+] as const;
+
+function assessorRecordHasData(rec: Record<string, any> | null | undefined): boolean {
+  if (!rec || typeof rec !== "object") return false;
+  return ASSESSOR_IDENTITY_KEYS.some((k) => {
+    const v = rec[k];
+    if (v === undefined || v === null) return false;
+    const s = String(v).trim();
+    return s !== "" && s !== "—" && s !== "-";
+  });
+}
+
+function mergeAssessorScalars(
+  parent: Record<string, any> | null,
+  row: Record<string, any>
+): Record<string, any> {
+  if (!parent) return row;
+  const { _records, _documents, _pagination, ...scalars } = parent;
+  const merged: Record<string, any> = { ...row, ...scalars };
+  for (const [k, v] of Object.entries(scalars)) {
+    if (v === undefined || v === null || String(v).trim() === "" || String(v).trim() === "—") continue;
+    const cur = merged[k];
+    if (cur === undefined || cur === null || String(cur).trim() === "" || String(cur).trim() === "—") {
+      merged[k] = v;
+    }
+  }
+  return merged;
+}
+
+function buildAssessorRecordsForDisplay(assessor: Record<string, any> | null): Record<string, any>[] {
+  if (!assessor) return [];
+  const raw = Array.isArray(assessor._records) ? assessor._records : [];
+  const meaningful = raw.filter((r) => assessorRecordHasData(r));
+  if (meaningful.length > 0) return meaningful;
+  if (raw.length > 0 && assessorRecordHasData(assessor)) {
+    const { _records: _r, ...rest } = assessor;
+    return [{ ...rest }];
+  }
+  if (assessorRecordHasData(assessor)) {
+    const { _records: _r, ...rest } = assessor;
+    return [rest];
+  }
+  return raw.length > 0 ? raw : [];
 }
 
 function DynamicTable({
@@ -662,6 +718,7 @@ export default function ExecutionResults() {
   const [documents, setDocuments] = useState<DocumentArtifact[]>([]);
   const [browserActivity, setBrowserActivity] = useState<BrowserActivityResponse | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -673,6 +730,7 @@ export default function ExecutionResults() {
   // Document Viewer & Mistral OCR Modal State
   const [viewingDoc, setViewingDoc] = useState<DocumentArtifact | null>(null);
   const [docBlobUrl, setDocBlobUrl] = useState<string | null>(null);
+  const [docContentType, setDocContentType] = useState<string>("application/pdf");
   const [docBlobLoading, setDocBlobLoading] = useState(false);
   const [docViewTab, setDocViewTab] = useState<"split" | "preview" | "ocr">("split");
   const [ocrLoading, setOcrLoading] = useState(false);
@@ -740,14 +798,35 @@ export default function ExecutionResults() {
     }
   };
 
+  const isDocumentDownloadable = (doc: DocumentArtifact) =>
+    doc.status.toLowerCase() === "validated" ||
+    doc.status.toLowerCase() === "completed" ||
+    doc.is_duplicate;
+
+  const downloadableDocuments = documents.filter(isDocumentDownloadable);
+
   const handleDownload = async (doc: DocumentArtifact) => {
     try {
       setDownloadingId(doc.id);
       await documentsApi.download(doc.id, doc.original_filename);
-    } catch (err: any) {
-      alert(err.response?.data?.detail || "Failed to download document.");
+    } catch (err: unknown) {
+      const message = await extractApiErrorMessage(err, "Failed to download document.");
+      alert(message);
     } finally {
       setDownloadingId(null);
+    }
+  };
+
+  const handleDownloadAll = async () => {
+    if (!runId || downloadableDocuments.length === 0) return;
+    try {
+      setDownloadingAll(true);
+      await executionsApi.downloadAllDocuments(runId);
+    } catch (err: unknown) {
+      const message = await extractApiErrorMessage(err, "Failed to download documents archive.");
+      alert(message);
+    } finally {
+      setDownloadingAll(false);
     }
   };
 
@@ -766,14 +845,16 @@ export default function ExecutionResults() {
   const handleView = async (doc: DocumentArtifact) => {
     setViewingDoc(doc);
     setDocBlobUrl(null);
+    setDocContentType(doc.mime_type || "application/pdf");
     setDocBlobLoading(true);
     setOcrResult(null);
     setOcrError(null);
     setDocViewTab("split");
 
     try {
-      const { blobUrl } = await documentsApi.viewBlob(doc.id);
+      const { blobUrl, contentType } = await documentsApi.viewBlob(doc.id);
       setDocBlobUrl(blobUrl);
+      setDocContentType(contentType || doc.mime_type || "application/pdf");
     } catch (err: any) {
       console.error("Failed to load document preview:", err);
     } finally {
@@ -807,8 +888,33 @@ export default function ExecutionResults() {
     }
     setViewingDoc(null);
     setDocBlobUrl(null);
+    setDocContentType("application/pdf");
     setOcrResult(null);
     setOcrError(null);
+  };
+
+  const handlePrintDocument = () => {
+    if (!docBlobUrl || !viewingDoc) return;
+    const isImage = docContentType.startsWith("image/");
+    if (isImage) {
+      const w = window.open("", "_blank", "width=900,height=700");
+      if (!w) {
+        alert("Allow pop-ups to print this document.");
+        return;
+      }
+      w.document.write(
+        `<html><head><title>${viewingDoc.original_filename}</title></head><body style="margin:0">` +
+          `<img src="${docBlobUrl}" style="max-width:100%" alt="${viewingDoc.original_filename}" />` +
+          `</body></html>`
+      );
+      w.document.close();
+      w.onload = () => w.print();
+      return;
+    }
+    const w = window.open(docBlobUrl, "_blank");
+    if (w) {
+      w.onload = () => w.print();
+    }
   };
 
   const handleCopyMarkdown = (text: string) => {
@@ -845,14 +951,12 @@ export default function ExecutionResults() {
   const assessor = results?.assessor_result as Record<string, any> | null;
   const tax = results?.tax_result as Record<string, any> | null;
 
-  const assessorRecords: Record<string, any>[] =
-    Array.isArray(assessor?._records) && assessor._records.length > 0
-      ? assessor._records
-      : assessor
-      ? [assessor]
-      : [];
+  const assessorRecords = buildAssessorRecordsForDisplay(assessor);
 
-  const currentAssessor = assessorRecords[selectedAssessorIndex] || assessorRecords[0] || assessor;
+  const currentAssessor = mergeAssessorScalars(
+    assessor,
+    assessorRecords[selectedAssessorIndex] || assessorRecords[0] || {}
+  );
 
   // Synthesize normalized property view if no explicit normalize node was run,
   // but assessor or tax records exist
@@ -1345,7 +1449,26 @@ export default function ExecutionResults() {
           <Card>
             <CardContent className="pt-6">
               {documents.length > 0 ? (
-                <div className="overflow-x-auto">
+                <div className="space-y-3">
+                  {downloadableDocuments.length > 0 && (
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs gap-1.5 border-slate-300 hover:bg-slate-50 text-slate-800"
+                        disabled={downloadingAll}
+                        onClick={handleDownloadAll}
+                      >
+                        {downloadingAll ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5" />
+                        )}
+                        Download All ({downloadableDocuments.length})
+                      </Button>
+                    </div>
+                  )}
+                  <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b text-left text-muted-foreground font-semibold">
@@ -1438,6 +1561,7 @@ export default function ExecutionResults() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               ) : (
                 <div className="text-center py-12 text-muted-foreground">
@@ -1680,6 +1804,16 @@ export default function ExecutionResults() {
                   size="sm"
                   variant="outline"
                   className="h-8 text-xs border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-white"
+                  onClick={handlePrintDocument}
+                  disabled={!docBlobUrl || docBlobLoading}
+                >
+                  <Printer className="w-3.5 h-3.5 mr-1" />
+                  Print
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-white"
                   onClick={() => handleDownload(viewingDoc)}
                   disabled={downloadingId === viewingDoc.id}
                 >
@@ -1712,11 +1846,21 @@ export default function ExecutionResults() {
                       <p className="text-xs font-medium">Loading document preview...</p>
                     </div>
                   ) : docBlobUrl ? (
-                    <iframe
-                      src={docBlobUrl}
-                      title={viewingDoc.original_filename}
-                      className="w-full flex-1 border-0"
-                    />
+                    docContentType.startsWith("image/") ? (
+                      <div className="flex-1 overflow-auto p-4 flex items-start justify-center bg-white">
+                        <img
+                          src={docBlobUrl}
+                          alt={viewingDoc.original_filename}
+                          className="max-w-full h-auto shadow-md border border-slate-200 rounded"
+                        />
+                      </div>
+                    ) : (
+                      <iframe
+                        src={docBlobUrl}
+                        title={viewingDoc.original_filename}
+                        className="w-full flex-1 border-0"
+                      />
+                    )
                   ) : (
                     <div className="flex-1 flex flex-col items-center justify-center p-8 text-slate-400 text-center">
                       <FileText className="w-10 h-10 text-slate-300 mb-2" />

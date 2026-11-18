@@ -17,6 +17,7 @@ import os
 import shutil
 import tempfile
 import uuid
+import zipfile
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -732,6 +733,59 @@ async def test_api_download_document(async_client: AsyncClient, test_user: User)
             assert res.headers["content-type"] == "application/pdf"
             assert "attachment;" in res.headers["content-disposition"]
             assert res.content == pdf_bytes
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_documents_zip(test_user: User):
+    temp_dir = tempfile.mkdtemp()
+    try:
+        backend = LocalDocumentStorage(base_dir=temp_dir)
+        storage = DocumentStorage(backend=backend)
+        pdf_bytes = generate_valid_pdf_bytes(title="Bulk Download Bill")
+
+        async with TestSessionLocal() as session:
+            run = WorkflowRun(
+                id=uuid.uuid4(),
+                workflow_id=uuid.uuid4(),
+                workflow_version_id=uuid.uuid4(),
+                triggered_by=test_user.id,
+                status="completed",
+                input_data={},
+            )
+            session.add(run)
+            await session.flush()
+
+            mock_downloader = MagicMock()
+            mock_downloader.download_direct = AsyncMock(
+                return_value=DownloadResult(
+                    success=True,
+                    data=pdf_bytes,
+                    content_type="application/pdf",
+                    original_filename="bulk_download_test.pdf",
+                )
+            )
+
+            service = DocumentService(db=session, storage=storage)
+            await service.process_document_retrieval(
+                discovered=DiscoveredDocument(
+                    document_url="https://county.gov/bulk_download_test.pdf",
+                    document_title="Bulk Download Test",
+                    document_type="tax_bill",
+                ),
+                downloader=mock_downloader,
+                workflow_run_id=run.id,
+            )
+            await session.commit()
+
+            zip_bytes, zip_name = await service.build_execution_documents_zip(run.id, test_user)
+            assert zip_name.endswith(".zip")
+
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+                names = archive.namelist()
+                assert len(names) == 1
+                assert archive.read(names[0]) == pdf_bytes
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

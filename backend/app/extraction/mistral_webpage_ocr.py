@@ -80,43 +80,48 @@ class MistralWebpageOCRService:
             return {}
 
         try:
-            # 1. Trigger lazy-loaded page elements by smooth auto-scrolling
-            if scroll_first and hasattr(page, "evaluate"):
+            from app.browser.property_capture_prep import (
+                capture_detail_screenshot_bytes,
+                is_gis_portal_url,
+                prepare_property_detail_view,
+                sanitize_extracted_record,
+            )
+
+            await prepare_property_detail_view(page, query_value=query_value)
+
+            from app.browser.property_capture_prep import (
+                expand_collapsible_detail_sections,
+                scroll_property_detail_page,
+            )
+
+            await expand_collapsible_detail_sections(page)
+            if scroll_first and not is_gis_portal_url(page.url or ""):
                 try:
-                    await page.evaluate("""async () => {
-                        await new Promise((resolve) => {
-                            let totalHeight = 0;
-                            const distance = 400;
-                            const timer = setInterval(() => {
-                                const scrollHeight = document.body.scrollHeight;
-                                window.scrollBy(0, distance);
-                                totalHeight += distance;
-                                if (totalHeight >= scrollHeight || totalHeight > 12000) {
-                                    clearInterval(timer);
-                                    window.scrollTo(0, 0);
-                                    resolve();
-                                }
-                            }, 80);
-                        });
-                    }""")
-                    await page.wait_for_timeout(400)
+                    await scroll_property_detail_page(page)
                 except Exception as scroll_err:
                     logger.debug("Auto-scroll before screenshot note: %s", scroll_err)
 
-            # 2. Capture full-page screenshot
-            screenshot_bytes = await page.screenshot(full_page=True, type="png")
+            # 2. Capture detail-focused screenshot (avoids GIS map toolbars / disclaimer overlays)
+            screenshot_bytes = await capture_detail_screenshot_bytes(page, query_value=query_value)
             if not screenshot_bytes or len(screenshot_bytes) < 1000:
-                logger.warning("Captured screenshot is empty or too small (%d bytes)", len(screenshot_bytes) if screenshot_bytes else 0)
+                logger.warning(
+                    "Captured screenshot is empty or too small (%d bytes)",
+                    len(screenshot_bytes) if screenshot_bytes else 0,
+                )
                 return {}
 
-            logger.info("Captured full-page screenshot (%d bytes) for Mistral OCR analysis", len(screenshot_bytes))
+            logger.info("Captured property screenshot (%d bytes) for Mistral OCR analysis", len(screenshot_bytes))
 
             # 3. Call Mistral OCR API
-            return await self.extract_from_image_bytes(
+            ocr_out = await self.extract_from_image_bytes(
                 image_bytes=screenshot_bytes,
                 mime_type="image/png",
                 query_value=query_value,
             )
+            if ocr_out:
+                qtype = "parcel" if query_value and re.search(r"\d-\d", query_value) else "address"
+                ocr_out = sanitize_extracted_record(ocr_out, query_value=query_value, query_type=qtype)
+            return ocr_out
         except Exception as exc:
             logger.warning("Mistral OCR page extraction failed: %s", exc)
             return {}
@@ -329,6 +334,7 @@ Rules:
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.0,
+                    "top_p": 1,
                     "response_format": {"type": "json_object"},
                 }
                 async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
@@ -338,8 +344,24 @@ Rules:
                         json=payload,
                     )
                     if resp.status_code == 200:
-                        content = resp.json()["choices"][0]["message"]["content"]
                         import json
+
+                        raw_content = resp.json()["choices"][0]["message"]["content"]
+                        if isinstance(raw_content, list):
+                            parts: list[str] = []
+                            for block in raw_content:
+                                if isinstance(block, dict):
+                                    parts.append(str(block.get("text") or block.get("content") or ""))
+                                else:
+                                    parts.append(str(block))
+                            content = "".join(parts).strip()
+                        elif isinstance(raw_content, dict):
+                            content = str(raw_content.get("text") or raw_content.get("content") or "")
+                        else:
+                            content = str(raw_content or "")
+                        if content.startswith("```"):
+                            content = re.sub(r"^```(?:json)?\s*", "", content)
+                            content = re.sub(r"\s*```$", "", content)
                         ai_data = json.loads(content)
                         logger.info("Mistral LLM (%s) structured OCR data successfully", chat_model)
                         return ai_data
@@ -354,7 +376,7 @@ Rules:
             if llm_configured():
                 resp, m_used = await chat_completions_create(
                     create_kwargs={
-                        "model": getattr(self.settings, "OPENAI_MODEL", "gpt-6-luna") or "gpt-6-luna",
+                        "model": getattr(self.settings, "OPENAI_MODEL", "gpt-4.1") or "gpt-4.1",
                         "messages": [
                             {"role": "system", "content": "You are a professional real estate and property document parser. Respond strictly in valid JSON."},
                             {"role": "user", "content": prompt},

@@ -1,10 +1,12 @@
 """High-level document retrieval orchestration service with download resilience, Range resumption, and lifecycle audit."""
 
 from datetime import datetime, timedelta, timezone
+import io
 import os
 from pathlib import Path
 import time
 import uuid
+import zipfile
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -607,3 +609,68 @@ class DocumentService:
         )
         doc_res = await self.db.execute(doc_stmt)
         return list(doc_res.scalars().all())
+
+    @staticmethod
+    def _is_document_downloadable(doc: DocumentArtifact) -> bool:
+        if doc.status == DocumentStatus.failed.value:
+            return False
+        if doc.is_duplicate:
+            return True
+        return doc.status in (DocumentStatus.validated.value, DocumentStatus.completed.value)
+
+    @staticmethod
+    def _unique_zip_entry_name(base: str, used: set[str]) -> str:
+        name = sanitize_filename(base) or "document.pdf"
+        if name not in used:
+            used.add(name)
+            return name
+        stem = Path(name).stem or "document"
+        suffix = Path(name).suffix or ".pdf"
+        counter = 2
+        while True:
+            candidate = f"{stem}_{counter}{suffix}"
+            if candidate not in used:
+                used.add(candidate)
+                return candidate
+            counter += 1
+
+    async def build_execution_documents_zip(
+        self,
+        workflow_run_id: uuid.UUID,
+        user: User,
+    ) -> tuple[bytes, str]:
+        """
+        Packages all downloadable documents for an execution into a single ZIP archive.
+        """
+        docs = await self.list_documents_for_execution(workflow_run_id, user)
+        buffer = io.BytesIO()
+        used_names: set[str] = set()
+        added = 0
+
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for doc in docs:
+                if not self._is_document_downloadable(doc):
+                    continue
+                try:
+                    data, filename, _mime = await self.get_document_binary_stream(doc.id, user)
+                except (LookupError, ValueError, PermissionError) as exc:
+                    logger.warning(
+                        "Skipping document %s in bulk ZIP for run %s: %s",
+                        doc.id,
+                        workflow_run_id,
+                        exc,
+                    )
+                    continue
+
+                entry_name = self._unique_zip_entry_name(
+                    filename or f"{doc.document_type}_{doc.id}.pdf",
+                    used_names,
+                )
+                archive.writestr(entry_name, data)
+                added += 1
+
+        if added == 0:
+            raise ValueError("No downloadable documents found for this execution.")
+
+        zip_name = sanitize_filename(f"retrieved_documents_{workflow_run_id}.zip")
+        return buffer.getvalue(), zip_name

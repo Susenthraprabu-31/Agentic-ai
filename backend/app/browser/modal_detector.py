@@ -92,6 +92,36 @@ MODAL_CANDIDATES_JS = r"""
         const buttons = [];
         const seenBtn = new Set();
 
+        const appendCloseButton = (b) => {
+            const bStyle = window.getComputedStyle(b);
+            if (bStyle.display === 'none' || bStyle.visibility === 'hidden') return;
+            const ariaLabel = (b.getAttribute('aria-label') || '').trim();
+            const innerTxt = (b.innerText || b.title || '').trim();
+            const txt = (innerTxt || ariaLabel || 'close').slice(0, 60);
+            let sel = '';
+            if (b.id && !/^\\d/.test(b.id)) {
+                sel = '#' + CSS.escape(b.id);
+            } else if (ariaLabel) {
+                sel = b.tagName.toLowerCase() + '[aria-label="' + ariaLabel.replace(/"/g, '\\\\"') + '"]';
+            } else if (b.className && String(b.className).includes('btn-close')) {
+                sel = b.tagName.toLowerCase() + '.btn-close';
+            } else {
+                return;
+            }
+            if (seenBtn.has(sel)) return;
+            seenBtn.add(sel);
+            buttons.unshift({
+                tag: b.tagName.toLowerCase(),
+                text: txt,
+                aria_label: ariaLabel,
+                selector: sel
+            });
+        };
+
+        el.querySelectorAll(
+            'button.btn-close, [aria-label*="close" i], [data-test*="close" i], button[title*="close" i]'
+        ).forEach(appendCloseButton);
+
         el.querySelectorAll('button, a, input[type="button"], input[type="submit"], [role="button"]').forEach(b => {
             const bStyle = window.getComputedStyle(b);
             if (bStyle.display !== 'none' && bStyle.visibility !== 'hidden') {
@@ -227,7 +257,10 @@ async def detect_and_dismiss_modal_ai(
         body_text = (c.get("text_preview") or "").lower()
         is_notice_context = any(
             k in title_text or k in body_text 
-            for k in ["disclaimer", "purpose", "informational", "terms", "agree", "notice", "alert", "consent", "warning", "cookie"]
+            for k in [
+                "disclaimer", "purpose", "informational", "terms", "agree", "notice", "alert",
+                "consent", "warning", "cookie", "notification", "public notifications",
+            ]
         )
         if is_notice_context or len(c.get("buttons", [])) <= 3:
             for b in c.get("buttons", []):
@@ -258,7 +291,7 @@ async def detect_and_dismiss_modal_ai(
             prompt = PROMPT_TEMPLATE.format(candidates_json=json.dumps(candidates, indent=2))
             resp, model_used = await chat_completions_create(
                 create_kwargs={
-                    "model": getattr(settings, "OPENAI_MODEL", "gpt-6-luna") or "gpt-6-luna",
+                    "model": getattr(settings, "OPENAI_MODEL", "gpt-4.1") or "gpt-4.1",
                     "messages": [
                         {"role": "system", "content": "You are a web automation assistant. Respond strictly in valid JSON."},
                         {"role": "user", "content": prompt},
@@ -416,4 +449,35 @@ async def detect_and_dismiss_modal_ai(
         "reasoning": ai_data.get("reasoning", ""),
         "dismissed": dismissed,
     }
+
+
+async def dismiss_blocking_overlays_heuristic(page: Page, *, max_passes: int = 3) -> bool:
+    """
+    Click visible close/dismiss controls on overlays (e.g. public notification drawers)
+    without county-specific selectors.
+    """
+    close_selectors = [
+        "button.btn-close:visible",
+        "[aria-label*='close' i]:visible",
+        "[data-test*='notifications-close' i]:visible",
+        "[data-test*='notification'][data-test*='close' i]:visible",
+        "button[title*='close' i]:visible",
+    ]
+    dismissed = False
+    for _ in range(max_passes):
+        clicked = False
+        for frame in page.frames:
+            for sel in close_selectors:
+                try:
+                    loc = frame.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible(timeout=250):
+                        await loc.click(timeout=2000)
+                        clicked = True
+                        dismissed = True
+                        await page.wait_for_timeout(350)
+                except Exception:
+                    continue
+        if not clicked:
+            break
+    return dismissed
 

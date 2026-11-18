@@ -464,34 +464,72 @@ class AIPageAnalyzerService:
         })
 
         # 2. Site Address Conditional Branch
-        if address_tab_sel:
+        address_tab_from_plan = executed_plan.get("tab_selector") if executed_qt == "address" and executed_plan else None
+        if address_tab_from_plan:
+            steps.append({
+                "action": "click_if_visible",
+                "selector": address_tab_from_plan,
+                "condition": "input.address",
+                "description": "Click address search tab/section",
+                "optional": True,
+            })
+        elif address_tab_sel:
             steps.append({
                 "action": "click",
                 "selector": address_tab_sel,
                 "condition": "input.address",
                 "description": "Click Site Address search tab",
             })
-        steps.extend([
-            {
-                "action": "wait_for_selector",
-                "selector": address_inp_sel,
-                "condition": "input.address",
-                "description": "Wait for Site Address input field",
-            },
-            {
-                "action": "fill",
-                "selector": address_inp_sel,
-                "value": "{{input.address}}",
-                "condition": "input.address",
-                "description": "Enter property address into search field",
-            },
-            {
-                "action": "click",
-                "selector": address_btn_sel,
-                "condition": "input.address",
-                "description": "Click Search for Site Address",
-            },
-        ])
+
+        address_fills = executed_plan.get("fills") if executed_qt == "address" and executed_plan else None
+        if address_fills:
+            from app.browser.page_search_ai import ADDRESS_FIELD_VALUE_TEMPLATES
+
+            for fill in address_fills:
+                sel = fill.get("selector")
+                if not sel:
+                    continue
+                role = (fill.get("field_role") or "mailing_line").strip()
+                value_tpl = ADDRESS_FIELD_VALUE_TEMPLATES.get(role, "{{input.address}}")
+                desc = f"Enter address field ({role.replace('_', ' ')})"
+                steps.extend([
+                    {
+                        "action": "wait_for_selector",
+                        "selector": sel,
+                        "condition": "input.address",
+                        "description": f"Wait for {role.replace('_', ' ')}",
+                        "timeout_ms": 12000,
+                    },
+                    {
+                        "action": "fill",
+                        "selector": sel,
+                        "value": value_tpl,
+                        "condition": "input.address",
+                        "description": desc,
+                    },
+                ])
+        else:
+            steps.extend([
+                {
+                    "action": "wait_for_selector",
+                    "selector": address_inp_sel,
+                    "condition": "input.address",
+                    "description": "Wait for Site Address input field",
+                },
+                {
+                    "action": "fill",
+                    "selector": address_inp_sel,
+                    "value": "{{input.address}}",
+                    "condition": "input.address",
+                    "description": "Enter property address into search field",
+                },
+            ])
+        steps.append({
+            "action": "click",
+            "selector": address_btn_sel,
+            "condition": "input.address",
+            "description": "Click Search for Site Address",
+        })
 
         # 3. Owner Name Conditional Branch
         if owner_tab_sel:
@@ -538,13 +576,31 @@ class AIPageAnalyzerService:
         if result_click_info:
             click_target = result_click_info.get("selector") or result_click_info.get("click_selector")
 
-        generic_result_sel = "table tbody tr td.link, td[data-bind*='goTo'], td[data-bind*='goToPin'], table tr:not(:first-child) td a, a[href*='PropertySearch'], a[href*='propertydetails' i], a[href*='detail' i], a[href*='parcel' i], a[href*='RecordDetail' i], a[href*='FolioID' i], table tbody tr td.pointer"
-        final_result_sel = f"{click_target}, {generic_result_sel}" if click_target else generic_result_sel
+        parcel_for_sel = ""
+        if executed_plan:
+            parcel_for_sel = str(
+                executed_plan.get("query_value")
+                or executed_plan.get("query")
+                or ""
+            ).strip()
+        if parcel_for_sel:
+            parcel_result_sel = (
+                f'a:has-text("{parcel_for_sel}"), '
+                f'td a:has-text("{parcel_for_sel}"), '
+                f'tr:has-text("{parcel_for_sel}") a'
+            )
+        else:
+            parcel_result_sel = (
+                "td.link, td[data-bind*='goTo'], td[data-bind*='goToPin'], "
+                "a[href*='RecordDetail' i], a[href*='FolioID' i], a[href*='parceldetail' i]"
+            )
+        final_result_sel = f"{click_target}, {parcel_result_sel}" if click_target else parcel_result_sel
 
         steps.append({
             "action": "click_if_visible",
             "selector": final_result_sel,
-            "description": (result_click_info.get("description") if result_click_info else None) or "Click matching parcel number or result record in search results table to view property details",
+            "description": (result_click_info.get("description") if result_click_info else None)
+            or f"Click parcel {parcel_for_sel} in search results to open Parcel Details",
             "optional": True,
             "timeout_ms": 10000,
         })
@@ -582,10 +638,21 @@ class AIPageAnalyzerService:
             },
         }
 
+        from app.services.portal_search_orchestrator import build_recipe_metadata
+
+        metadata = build_recipe_metadata(
+            portal_url=portal_url,
+            county_source_id=None,
+            record_type=record_type,
+            query_types=["parcel", "address", "owner"],
+        )
+        # county_source_id is injected at save time in _save_recipe_to_db
+
         return {
             "steps": steps,
             "field_mappings": field_mappings,
             "table_settings": table_settings,
+            "metadata": metadata,
         }
 
     async def _save_recipe_to_db(
@@ -599,6 +666,17 @@ class AIPageAnalyzerService:
         user_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Persists the generated Recipe, RecipeVersion, and updates SourceConfiguration in PostgreSQL."""
+        from app.services.portal_search_orchestrator import build_recipe_metadata
+
+        meta = recipe_def.get("metadata") or build_recipe_metadata(
+            portal_url=target_url,
+            county_source_id=str(county_source_id),
+            record_type=record_type,
+        )
+        meta["county_source_id"] = str(county_source_id)
+        meta["portal_url"] = target_url
+        recipe_def["metadata"] = meta
+
         # 1. Find or create Recipe
         rec_stmt = (
             select(Recipe)

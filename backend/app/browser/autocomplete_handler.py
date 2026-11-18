@@ -195,14 +195,14 @@ async def detect_and_select_autocomplete(
         except Exception as e:
             logger.debug("Autocomplete JS click fallback note: %s", e)
 
-    # Universal keyboard commit fallback (ArrowDown + Enter) for Knockout / jQuery UI listboxes
-    try:
-        await page.keyboard.press("ArrowDown")
-        await page.wait_for_timeout(150)
-        await page.keyboard.press("Enter")
-        clicked = True
-    except Exception:
-        pass
+    if not clicked:
+        try:
+            await page.keyboard.press("ArrowDown")
+            await page.wait_for_timeout(150)
+            await page.keyboard.press("Enter")
+            clicked = True
+        except Exception:
+            pass
 
     # Log browser activity milestone
     if clicked:

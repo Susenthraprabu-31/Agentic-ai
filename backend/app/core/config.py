@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     # OpenAI & LLM (Phase 2 & 3)
     # -------------------------------------------------------------------------
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-6-luna"
+    OPENAI_MODEL: str = "gpt-4.1"
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     DOCUMENT_STORAGE_DIR: str = "storage/documents"
     DOCUMENT_MAX_FILE_SIZE_BYTES: int = 26214400  # 25 MB
     DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS: int = 30
+    TAX_RECENT_YEAR_SCREENSHOT_COUNT: int = 2
 
     # -------------------------------------------------------------------------
     # Resilience & Retry Engine (Phase 3D.1)

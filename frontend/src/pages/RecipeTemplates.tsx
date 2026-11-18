@@ -74,6 +74,7 @@ export default function RecipeTemplates() {
   // RECIPES STATE
   // ──────────────────────────────────────────────────────────────────────────
   const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [recipeTotal, setRecipeTotal] = useState(0);
   const [recipeSearch, setRecipeSearch] = useState("");
   const [recipeRecordTypeFilter, setRecipeRecordTypeFilter] = useState<string>("all");
   const [recipeStatusFilter, setRecipeStatusFilter] = useState<string>("all");
@@ -97,6 +98,7 @@ export default function RecipeTemplates() {
   // UI TEMPLATES STATE
   // ──────────────────────────────────────────────────────────────────────────
   const [templates, setTemplates] = useState<UITemplate[]>([]);
+  const [templateTotal, setTemplateTotal] = useState(0);
   const [templateSearch, setTemplateSearch] = useState("");
   const [patternTypeFilter, setPatternTypeFilter] = useState("all");
 
@@ -149,13 +151,13 @@ export default function RecipeTemplates() {
   const fetchRecipes = async () => {
     try {
       setLoading(true);
-      const res = await recipeTemplatesApi.getRecipes({
+      const res = await recipeTemplatesApi.getAllRecipes({
         search: recipeSearch || undefined,
         record_type: recipeRecordTypeFilter === "all" ? undefined : recipeRecordTypeFilter,
         status: recipeStatusFilter === "all" ? undefined : recipeStatusFilter,
-        limit: 100,
       });
       setRecipes(res.items || []);
+      setRecipeTotal(res.total ?? (res.items || []).length);
     } catch (err: any) {
       setErrorMsg(err.response?.data?.detail || "Failed to load recipes");
     } finally {
@@ -165,12 +167,12 @@ export default function RecipeTemplates() {
 
   const fetchTemplates = async () => {
     try {
-      const res = await recipeTemplatesApi.getTemplates({
+      const res = await recipeTemplatesApi.getAllTemplates({
         search: templateSearch || undefined,
         pattern_type: patternTypeFilter === "all" ? undefined : patternTypeFilter,
-        limit: 100,
       });
       setTemplates(res.items || []);
+      setTemplateTotal(res.total ?? (res.items || []).length);
     } catch (err: any) {
       console.error(err);
     }
@@ -687,7 +689,7 @@ export default function RecipeTemplates() {
           <BookOpen className="w-4 h-4" />
           Recipes
           <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
-            {recipes.length}
+            {recipeTotal || recipes.length}
           </span>
         </button>
 
@@ -702,7 +704,7 @@ export default function RecipeTemplates() {
           <Layers className="w-4 h-4" />
           UI Templates
           <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
-            {templates.length}
+            {templateTotal || templates.length}
           </span>
         </button>
 
@@ -780,7 +782,7 @@ export default function RecipeTemplates() {
 
           {/* Recipes Table */}
           <Card>
-            <CardContent className="p-0">
+            <CardContent className="p-0 max-h-[calc(100vh-17rem)] overflow-y-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -877,6 +879,12 @@ export default function RecipeTemplates() {
                 </TableBody>
               </Table>
             </CardContent>
+            {(recipeTotal > 0 || recipes.length > 0) && (
+              <div className="border-t px-4 py-2 text-xs text-muted-foreground bg-slate-50">
+                Showing {recipes.length} of {recipeTotal || recipes.length} recipe
+                {(recipeTotal || recipes.length) === 1 ? "" : "s"}
+              </div>
+            )}
           </Card>
         </div>
       )}
@@ -918,7 +926,7 @@ export default function RecipeTemplates() {
 
           {/* Templates Table */}
           <Card>
-            <CardContent className="p-0">
+            <CardContent className="p-0 max-h-[calc(100vh-17rem)] overflow-y-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -1004,6 +1012,12 @@ export default function RecipeTemplates() {
                 </TableBody>
               </Table>
             </CardContent>
+            {(templateTotal > 0 || templates.length > 0) && (
+              <div className="border-t px-4 py-2 text-xs text-muted-foreground bg-slate-50">
+                Showing {templates.length} of {templateTotal || templates.length} template
+                {(templateTotal || templates.length) === 1 ? "" : "s"}
+              </div>
+            )}
           </Card>
         </div>
       )}

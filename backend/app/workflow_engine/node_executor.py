@@ -10,6 +10,13 @@ from sqlalchemy import select
 
 from app.browser.browser_manager import get_browser_context
 from app.browser.page_search_ai import PageSearchAI
+from app.services.portal_search_orchestrator import (
+    PortalSearchOrchestrator,
+    ExecutionMode,
+    assess_recipe_compatibility,
+    decide_execution_mode,
+    validate_property_matches_query,
+)
 from app.browser.pagination_handler import PaginationHandler
 from app.browser.recipe_loader import RecipeLoader, RecipeLoadException
 from app.browser.step_runner import (
@@ -27,6 +34,66 @@ from app.models.county_source import CountySource
 from app.workflow_engine.execution_context import ExecutionContext, NodeExecutionResult
 
 logger = get_logger(__name__)
+
+
+def _query_condition(query_type: str) -> str:
+    mapping = {
+        "parcel": "input.parcel_id",
+        "address": "input.address",
+        "owner": "input.owner_name",
+    }
+    return mapping.get(query_type, "input.parcel_id")
+
+
+def _step_applies_to_query(step: dict[str, Any], query_type: str) -> bool:
+    cond = step.get("condition")
+    if not cond:
+        return True
+    needed = _query_condition(query_type)
+    return needed in str(cond)
+
+
+async def _recipe_compatible_with_query(
+    page,
+    steps: list[dict[str, Any]],
+    query_type: str,
+    resolved: Any | None = None,
+    portal_url: str = "",
+    county_source_id: str | None = None,
+) -> bool:
+    """Backward-compatible wrapper; prefer assess_recipe_compatibility on ResolvedRecipe."""
+    if resolved and getattr(resolved, "steps", None):
+        result = await assess_recipe_compatibility(
+            page,
+            resolved,
+            portal_url=portal_url,
+            county_source_id=county_source_id,
+            query_type=query_type,
+        )
+        return result.compatible
+    if not steps:
+        return False
+    generic_selectors = ('input[type="text"]', "input[type='text']", "input[type=\"search\"]")
+    for step in steps:
+        if step.get("action") != "fill" or not _step_applies_to_query(step, query_type):
+            continue
+        selector = step.get("selector") or step.get("locator", {}).get("value")
+        if not selector or str(selector).startswith("{{"):
+            continue
+        sel_lower = str(selector).lower()
+        if query_type == "address" and any(g in sel_lower for g in generic_selectors):
+            continue
+        if query_type == "address" and ("altkey" in sel_lower or "alt_key" in sel_lower):
+            continue
+        try:
+            if await page.locator(selector).count() > 0:
+                return True
+            for frame in page.frames:
+                if await frame.locator(selector).count() > 0:
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 class BaseNodeExecutor(ABC):
@@ -57,16 +124,15 @@ class InputNodeExecutor(BaseNodeExecutor):
 
         has_any_criteria = bool(raw_parcel or raw_address or raw_owner)
 
-        missing_params = [
-            param for param in required_params
-            if param not in provided_input or not str(provided_input[param]).strip()
-        ]
-
-        if missing_params and not has_any_criteria:
+        if not has_any_criteria:
             duration = int((time.time() - start_time) * 1000)
+            hinted = ", ".join(required_params) if required_params else "parcel_id, address, owner_name"
             return NodeExecutionResult(
                 status="FAILED",
-                error_message=f"Missing required search input parameters: {', '.join(missing_params)}",
+                error_message=(
+                    "Provide at least one search criterion "
+                    f"(parcel_id, address, or owner_name). Expected one of: {hinted}"
+                ),
                 duration_ms=duration,
             )
 
@@ -86,61 +152,7 @@ class InputNodeExecutor(BaseNodeExecutor):
 
 
 def _is_genuine_property_identity(data: dict[str, Any] | None, current_url: str = "") -> bool:
-    """
-    Validates whether extracted data represents an authentic property record
-    rather than placeholder strings, search form labels, or radio button text.
-    """
-    if not data or not isinstance(data, dict):
-        return False
-
-    url_lower = (current_url or "").lower()
-    is_search_page = any(
-        term in url_lower
-        for term in ["/nav/basic", "basic%20search", "#/nav/", "/search.html", "/search.aspx", "/search/basic"]
-    ) and not any(term in url_lower for term in ["/parcel/", "/detail/", "account", "propertydetails", "folioid", "recorddetail"])
-
-    owner = str(data.get("owner_name") or "").strip().upper()
-    parcel = str(data.get("parcel_number") or "").strip().upper()
-    address = str(data.get("property_address") or "").strip().upper()
-
-    dummy_owners = {
-        "", "NONE", "NULL", "N/A", "UNKNOWN", "OWNER OF RECORD", "OWNER",
-        "AND", "OR", "PROPERTY SEARCH", "BASIC SEARCH", "BASIC PROPERTY SEARCH"
-    }
-    dummy_parcels = {
-        "", "NONE", "NULL", "N/A", "UNKNOWN", "01-002-0034",
-        "(ONLY AVAILABLE WITH FOLIO OR PARCEL NUMBER SEARCH)",
-        "ONLY AVAILABLE WITH FOLIO OR PARCEL NUMBER SEARCH"
-    }
-    dummy_addresses = {
-        "", "NONE", "NULL", "N/A", "UNKNOWN", "OR", "AND", "SITE ADDRESS",
-        "STREET ADDRESS", "PROPERTY ADDRESS", "SITE LOCATION", "LOCATION"
-    }
-
-    valid_owner = bool(
-        owner
-        and owner not in dummy_owners
-        and len(owner) >= 3
-        and not owner.startswith("ONLY AVAILABLE")
-    )
-    valid_parcel = bool(
-        parcel
-        and parcel not in dummy_parcels
-        and len(re.sub(r"\D", "", parcel)) >= 3
-        and not parcel.startswith("ONLY AVAILABLE")
-        and not parcel.startswith("(")
-    )
-    valid_address = bool(
-        address
-        and address not in dummy_addresses
-        and len(address) >= 5
-        and any(char.isdigit() for char in address)
-    )
-
-    if is_search_page and not (valid_owner and (valid_parcel or valid_address)):
-        return False
-
-    return bool(valid_owner or (valid_address and valid_parcel))
+    return PortalSearchOrchestrator.is_genuine_property_identity(data, current_url)
 
 
 async def _execute_browser_search(
@@ -259,6 +271,7 @@ async def _execute_browser_search(
                         wait_for_mount=True,
                     )
 
+            modal_res: dict[str, Any] = {}
             # Dynamically detect and dismiss disclaimer / modal using AI before step execution
             if not recipe_nav_url or not str(recipe_nav_url).startswith("data:"):
                 try:
@@ -269,34 +282,25 @@ async def _execute_browser_search(
                 except Exception as d_err:
                     logger.debug("Modal detector pre-check note: %s", d_err)
 
-            # Pre-validate if resolved recipe steps are compatible with current page DOM
-            can_run_recipe = False
-            if resolved and resolved.steps:
-                fill_selectors = [
-                    s.get("selector") or s.get("locator", {}).get("value")
-                    for s in resolved.steps
-                    if s.get("action") == "fill" and (s.get("selector") or s.get("locator", {}).get("value"))
-                ]
-                if not fill_selectors:
-                    can_run_recipe = True
-                else:
-                    for f_sel in fill_selectors:
-                        if not f_sel or f_sel.startswith("{{"):
-                            continue
-                        try:
-                            if await page.locator(f_sel).count() > 0:
-                                can_run_recipe = True
-                                break
-                            for f in page.frames:
-                                if await f.locator(f_sel).count() > 0:
-                                    can_run_recipe = True
-                                    break
-                        except Exception:
-                            continue
-                        if can_run_recipe:
-                            break
+            logger.info(
+                "recipe_lookup county_source=%s recipe_version=%s recipe_name=%s steps=%d",
+                target_county_id,
+                getattr(resolved, "recipe_version_id", None) if resolved else None,
+                getattr(resolved, "recipe_name", None) if resolved else None,
+                len(resolved.steps) if resolved and resolved.steps else 0,
+            )
 
-            # If recipe steps exist and match the page, execute them
+            compat = await assess_recipe_compatibility(
+                page,
+                resolved,
+                portal_url=portal_url or target_url or page.url,
+                county_source_id=str(target_county_id) if target_county_id else None,
+                query_type=active_query_type,
+                record_type=record_type,
+            )
+            can_run_recipe = compat.compatible
+
+            recipe_execution_success = False
             if can_run_recipe and resolved and resolved.steps:
                 try:
                     runner = PlaywrightStepRunner(page, str(context.run_id), str(node_id))
@@ -315,43 +319,106 @@ async def _execute_browser_search(
                         extract_schema=resolved.extract_schema,
                         table_settings=resolved.table_settings,
                     )
+                    extracted["_source_url"] = page.url or ""
                     executed_standard_steps = True
+                    recipe_execution_success = True
+                    logger.info("playwright_recipe_execution_completed mode=%s", ExecutionMode.SAVED_RECIPE_EXECUTION.value)
+                    if record_type == "assessor" and active_query_val:
+                        try:
+                            from app.browser.property_capture_prep import ensure_property_detail_workspace
+
+                            await ensure_property_detail_workspace(page, active_query_val)
+                        except Exception as detail_prep_err:
+                            logger.debug("Post-recipe property detail prep: %s", detail_prep_err)
                 except (SecurityChallengeException, SSRFProtectionException, RecipeLoadException):
                     raise
                 except Exception as step_exc:
                     logger.warning("Step runner error: %s. Falling back to inline AI Page Search.", step_exc)
                     extracted = {}
+                    recipe_execution_success = False
 
-            # Dynamic AI Page Analysis:
-            # If no recipe was loaded, recipe selectors were incompatible, or key fields are not genuine:
-            has_property_identity = _is_genuine_property_identity(extracted, current_url=page.url or "")
+            prop_validation = validate_property_matches_query(
+                extracted,
+                active_query_type,
+                active_query_val,
+            )
+            execution_mode, mode_reason = decide_execution_mode(
+                resolved=resolved,
+                compat=compat,
+                recipe_executed=executed_standard_steps,
+                recipe_execution_success=recipe_execution_success,
+                property_validation=prop_validation,
+            )
+            logger.info(
+                "execution_mode_selected mode=%s reason=%s property_identity=%s property_match=%s",
+                execution_mode.value,
+                mode_reason,
+                prop_validation.identity_ok,
+                prop_validation.match_ok,
+            )
 
-            if not executed_standard_steps or not has_property_identity:
-                logger.info("Analyzing loaded page with AI inside node %s for %s: %s (reason: standard_steps=%s, genuine_identity=%s)", node_id, active_query_type, active_query_val, executed_standard_steps, has_property_identity)
+            if execution_mode in (ExecutionMode.FIRST_TIME_AI_DISCOVERY, ExecutionMode.AI_RECOVERY):
+                logger.info(
+                    "ai_fallback_start mode=%s node=%s query_type=%s query=%s",
+                    execution_mode.value,
+                    node_id,
+                    active_query_type,
+                    active_query_val,
+                )
                 ai_search = PageSearchAI(db=context.db_session)
                 if modal_res and modal_res.get("has_disclaimer"):
                     ai_search._last_disclaimer_action = modal_res
 
-                # Ensure page is at the portal step-by-step
-                curr_url = page.url or ""
-                if not curr_url or curr_url.startswith("about:"):
-                    if portal_url:
-                        await navigate_portal_step_by_step(
-                            page=page,
-                            url=portal_url,
-                            workflow_run_id=str(context.run_id),
-                            node_id=str(node_id),
-                            wait_for_mount=True,
-                        )
+                from app.services.portal_search_orchestrator import _normalize_host
 
-                snapshot = await ai_search.extract_snapshot(page)
-                plan = await ai_search.plan_search(snapshot, active_query_type, active_query_val)
-                ai_res = await ai_search.execute_plan(
-                    page,
-                    plan,
-                    active_query_val,
+                curr_url = page.url or ""
+                need_portal_nav = (
+                    not curr_url
+                    or curr_url.startswith("about:")
+                    or (
+                        execution_mode == ExecutionMode.AI_RECOVERY
+                        and portal_url
+                        and _normalize_host(portal_url)
+                        and _normalize_host(curr_url) != _normalize_host(portal_url)
+                    )
+                )
+                if need_portal_nav and portal_url:
+                    await navigate_portal_step_by_step(
+                        page=page,
+                        url=portal_url,
+                        workflow_run_id=str(context.run_id),
+                        node_id=str(node_id),
+                        wait_for_mount=True,
+                    )
+
+                try:
+                    from app.extraction.tax_collector_reports import (
+                        ensure_tax_collector_search_page,
+                        is_tax_collector_portal,
+                    )
+
+                    if record_type == "tax" and (
+                        is_tax_collector_portal(page.url or "")
+                        or is_tax_collector_portal(portal_url or target_url or "")
+                    ):
+                        await ensure_tax_collector_search_page(
+                            page,
+                            query_value=active_query_val,
+                            portal_search_url=portal_url or target_url,
+                        )
+                except Exception as tax_prep_err:
+                    logger.debug("Tax portal prep before AI recovery: %s", tax_prep_err)
+
+                ai_res = await ai_search.run_full_ai_search(
+                    page=page,
+                    query_type=active_query_type,
+                    query_value=active_query_val,
+                    portal_url=portal_url or (page.url or ""),
+                    county_name=county_name,
+                    record_type=record_type,
                     workflow_run_id=str(context.run_id),
                     node_id=str(node_id),
+                    target_county_id=str(target_county_id) if target_county_id else None,
                 )
 
                 ai_rec = ai_res.get("record", {})
@@ -359,24 +426,13 @@ async def _execute_browser_search(
                     if v is not None:
                         extracted[k] = v
 
-                # Store/persist discovered recipe actions into recipes & recipe_versions in PostgreSQL
-                if context.db_session and target_county_id:
-                    try:
-                        rec, rec_ver = await ai_search.save_discovered_recipe(
-                            county_source_id=uuid.UUID(str(target_county_id)),
-                            record_type=record_type,
-                            county_name=county_name,
-                            portal_url=portal_url,
-                            dom_snapshot=snapshot,
-                            user_id=None,
-                            plan=plan,
-                        )
-                        logger.info(
-                            "Persisted AI Discovered Recipe %s (v%d, id: %s) in PostgreSQL",
-                            rec.name, rec_ver.version_number, rec_ver.id
-                        )
-                    except Exception as save_err:
-                        logger.warning("Could not persist AI recipe to database: %s", save_err)
+                plan = ai_res.get("plan") or {}
+                if context.db_session and target_county_id and plan.get("runtime_steps"):
+                    logger.info(
+                        "AI generated %d Playwright step(s); validation=%s",
+                        len(plan.get("runtime_steps", [])),
+                        (plan.get("validation") or {}).get("ok"),
+                    )
 
             # Handle pagination if configured
             if resolved and resolved.pagination_settings and (
@@ -430,8 +486,23 @@ async def _execute_browser_search(
                     except Exception:
                         pass
 
+            already_has_ocr = bool(
+                extracted.get("ocr_markdown")
+                or extracted.get("ocr_key_values")
+                or (extracted.get("_documents") and len(extracted.get("_documents") or []) > 0)
+            )
+
             # If extracted details are incomplete or not genuine, perform Mistral OCR on rendered page
-            if not _is_genuine_property_identity(extracted, current_url=page.url or ""):
+            skip_assessor_node_ocr = (
+                record_type == "assessor"
+                and recipe_execution_success
+                and bool(extracted.get("parcel_number") or clean_parcel or active_query_val)
+            )
+            if (
+                not already_has_ocr
+                and not skip_assessor_node_ocr
+                and not _is_genuine_property_identity(extracted, current_url=page.url or "")
+            ):
                 try:
                     from app.extraction.mistral_webpage_ocr import get_mistral_webpage_ocr
                     ocr_srv = get_mistral_webpage_ocr()
@@ -467,12 +538,49 @@ async def _execute_browser_search(
                         download_universal_assessor_reports,
                         register_downloaded_documents,
                     )
-                    target_parcel = extracted.get("parcel_number") or clean_parcel or active_query_val
-                    generated_docs = await download_universal_assessor_reports(
-                        page=page,
-                        parcel_id=str(target_parcel),
-                        county_name=county_name,
+                    from app.browser.property_capture_prep import (
+                        is_gis_portal_url,
+                        is_plausible_parcel_id,
+                        open_gis_search_result_row,
+                        wait_for_property_detail_ready,
                     )
+
+                    if is_gis_portal_url(page.url or "") and active_query_val:
+                        if not await wait_for_property_detail_ready(
+                            page, query_value=active_query_val, timeout_ms=2500
+                        ):
+                            opened = await open_gis_search_result_row(
+                                page,
+                                active_query_val,
+                                query_type=active_query_type,
+                                workflow_run_id=str(context.run_id),
+                                node_id=str(node_id),
+                            )
+                            if opened.get("clicked"):
+                                logger.info("Opened GIS parcel before document capture: %s", opened.get("description"))
+
+                    prior_docs = extracted.get("_documents") or []
+                    has_assessor_doc = prior_docs and any(
+                        (d.get("document_type") or "")
+                        in ("Assessor Property Card", "TRIM Notice")
+                        for d in prior_docs
+                    )
+                    generated_docs: list[dict[str, Any]] = []
+                    if has_assessor_doc:
+                        logger.info(
+                            "Skipping duplicate assessor download (%d doc(s) already on record)",
+                            len(prior_docs),
+                        )
+                    else:
+                        target_parcel = extracted.get("parcel_number") or clean_parcel or active_query_val
+                        if not is_plausible_parcel_id(str(target_parcel), active_query_val or clean_parcel):
+                            target_parcel = clean_parcel or active_query_val
+                        generated_docs = await download_universal_assessor_reports(
+                            page=page,
+                            parcel_id=str(target_parcel),
+                            county_name=county_name,
+                            query_value=active_query_val or clean_parcel or "",
+                        )
 
                     if generated_docs:
                         doc_service = DocumentService(db=context.db_session) if context.db_session else None
@@ -510,17 +618,30 @@ async def _execute_browser_search(
 
                     # Capture full-page screenshot & download official Tax Bill PDF
                     doc_service = DocumentService(db=context.db_session) if context.db_session else None
-                    reg_meta = await capture_and_register_tax_documents(
+                    reg_meta, tax_screenshot_meta = await capture_and_register_tax_documents(
                         page=page,
                         parcel_id=target_parcel,
                         doc_service=doc_service,
                         workflow_run_id=context.run_id,
                         source_configuration_id=resolved.source_configuration_id if resolved else None,
+                        account_history=tax_extracted.get("account_history"),
                     )
+                    if tax_screenshot_meta:
+                        extracted["tax_screenshot_index"] = tax_screenshot_meta.get("tax_screenshot_index") or []
+                        extracted["tax_years_indexed"] = tax_screenshot_meta.get("tax_years_indexed") or []
+                        extracted["tax_recent_year_screenshots"] = (
+                            tax_screenshot_meta.get("tax_recent_year_screenshots") or []
+                        )
                     if reg_meta:
                         existing_docs = extracted.get("_documents") or []
                         extracted["_documents"] = existing_docs + reg_meta
-                        logger.info("Registered %d official tax collector documents for %s", len(reg_meta), target_parcel)
+                        logger.info(
+                            "Registered %d official tax collector documents for %s (years indexed: %s, recent: %s)",
+                            len(reg_meta),
+                            target_parcel,
+                            extracted.get("tax_years_indexed"),
+                            extracted.get("tax_recent_year_screenshots"),
+                        )
                 except Exception as tax_err:
                     logger.warning("Could not complete tax collector extraction/document capture: %s", tax_err)
 
@@ -565,6 +686,15 @@ async def _execute_browser_search(
                             "error_message": artifact.error_message,
                         })
                     extracted["_documents"] = retrieved_docs_meta
+
+            if record_type == "assessor":
+                from app.browser.property_capture_prep import finalize_assessor_extraction
+
+                extracted = finalize_assessor_extraction(
+                    extracted,
+                    query_value=active_query_val or clean_parcel or "",
+                    query_type=active_query_type,
+                )
 
             duration = int((time.time() - start_time) * 1000)
             return NodeExecutionResult(

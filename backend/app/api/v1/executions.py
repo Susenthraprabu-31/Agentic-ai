@@ -1,9 +1,11 @@
 """Executions router — query WorkflowRun, NodeRun, results, and cancel background tasks."""
 
+import io
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user
@@ -114,6 +116,38 @@ async def get_run_documents(
         is_superuser=current_user.is_superuser,
     )
     return [DocumentArtifactResponse.model_validate(doc) for doc in docs]
+
+
+@router.get(
+    "/{run_id}/documents/download-all",
+    summary="Download all execution documents as a ZIP archive",
+)
+async def download_all_run_documents(
+    run_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> StreamingResponse:
+    """Stream a ZIP archive containing every downloadable document artifact for this execution."""
+    from app.documents.document_service import DocumentService
+
+    doc_service = DocumentService(db=db)
+    try:
+        data, filename = await doc_service.build_execution_documents_zip(run_id, current_user)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(data)),
+        },
+    )
 
 
 @router.post(

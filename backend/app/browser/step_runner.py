@@ -55,6 +55,108 @@ class PlaywrightStepRunner:
         self.run_id = run_id
         self.node_id = node_id
         self.extractor = ResultExtractor(page, run_id, node_id)
+        self._last_fill_selector: str | None = None
+
+    async def _field_contains_value(self, selector: str, expected: str) -> bool:
+        needle = (expected or "").strip().lower()
+        if not needle:
+            return False
+        head = needle[: min(12, len(needle))]
+        for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
+            try:
+                loc = scope.locator(selector).first
+                if await loc.count() == 0:
+                    continue
+                cur = (await loc.input_value(timeout=1500)).strip().lower()
+                if head in cur or needle in cur:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _selector_looks_wrong_for_address(self, selector: str) -> bool:
+        from app.browser.page_search_ai import selector_looks_wrong_for_address
+
+        return selector_looks_wrong_for_address(selector)
+
+    async def _resolve_submit_fill_selector(self, qt: str, query_val: str) -> str | None:
+        """Prefer the input that actually holds the query (Address field), not the last mistaken fill."""
+        needle = (query_val or "").strip()
+        if not needle:
+            return self._last_fill_selector
+        head = needle.lower()[: min(14, len(needle))]
+        candidates: list[str] = []
+        if self._last_fill_selector:
+            candidates.append(self._last_fill_selector)
+        if qt == "address":
+            candidates.extend(
+                [
+                    'input[aria-label*="Address" i]',
+                    'label:has-text("Address") >> .. >> input',
+                    'input[placeholder*="address" i]',
+                    '#SiteStreetAddress',
+                ]
+            )
+        seen: set[str] = set()
+        best: str | None = None
+        for sel in candidates:
+            if not sel or sel in seen:
+                continue
+            seen.add(sel)
+            if not await self._field_contains_value(sel, needle):
+                continue
+            if qt == "address" and self._selector_looks_wrong_for_address(sel):
+                continue
+            best = sel
+            break
+        if best:
+            return best
+        if qt == "address" and self._last_fill_selector and self._selector_looks_wrong_for_address(
+            self._last_fill_selector
+        ):
+            return None
+        return self._last_fill_selector
+
+    async def _fill_address_field_fallbacks(
+        self,
+        val: str,
+        context_vars: dict[str, Any],
+    ) -> bool:
+        fallbacks = [
+            'input[formcontrolname*="address" i]',
+            'input[placeholder*="address" i]',
+            'input[placeholder*="Enter Address" i]',
+            'input[aria-label*="Address" i]',
+            'label:has-text("Address") + input',
+            '#SiteStreetAddress',
+        ]
+        for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
+            try:
+                loc = scope.get_by_label(re.compile(r"^\s*address\s*:?\s*$", re.I)).first
+                if await loc.count() > 0 and await loc.is_visible(timeout=800):
+                    await loc.fill(val, timeout=2500)
+                    await loc.dispatch_event("input")
+                    await loc.dispatch_event("change")
+                    self._last_fill_selector = 'label:has-text("Address") >> .. >> input'
+                    logger.info("Filled address via get_by_label(Address)")
+                    return True
+            except Exception:
+                continue
+        for fb in fallbacks:
+            for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
+                try:
+                    loc = scope.locator(fb).first
+                    if await loc.count() == 0 or not await loc.is_visible(timeout=800):
+                        continue
+                    await loc.fill(val, timeout=2500)
+                    await loc.dispatch_event("input")
+                    await loc.dispatch_event("change")
+                    self._last_fill_selector = fb
+                    logger.info("Filled address via fallback selector %s", fb)
+                    return True
+                except Exception:
+                    continue
+        return False
 
     def _interpolate_value(self, template_str: str, context_vars: dict[str, Any]) -> str:
         """Interpolates variables like {{search_url}} or {{input.parcel_id}}."""
@@ -201,8 +303,14 @@ class PlaywrightStepRunner:
     async def _dismiss_disclaimer_if_present(self) -> None:
         """Auto-detects and dismisses government portal disclaimer/modal dynamically using AI."""
         try:
-            from app.browser.modal_detector import detect_and_dismiss_modal_ai
+            from app.browser.modal_detector import (
+                detect_and_dismiss_modal_ai,
+                dismiss_blocking_overlays_heuristic,
+            )
+
+            await dismiss_blocking_overlays_heuristic(self.page)
             await detect_and_dismiss_modal_ai(self.page, workflow_run_id=self.run_id, node_id=self.node_id)
+            await dismiss_blocking_overlays_heuristic(self.page)
         except Exception as e:
             logger.debug("Modal dismissal pre-check note: %s", e)
 
@@ -342,11 +450,24 @@ class PlaywrightStepRunner:
                 # -------------------------------------------------------------
                 # 2. Form Inputs & Interactions (Frame-Aware)
                 # -------------------------------------------------------------
+                elif action == "expand_search_section":
+                    target_sel = (step.get("selector") or selector or "").strip()
+                    if target_sel:
+                        from app.browser.page_search_ai import ensure_search_panel_for_selector
+
+                        if await ensure_search_panel_for_selector(self.page, target_sel):
+                            logger.info("Expanded search panel for %s", target_sel)
+                            await self.page.wait_for_timeout(400)
+
                 elif action == "fill":
                     raw_val = step.get("value", "")
                     val = self._interpolate_value(raw_val, context_vars)
                     target = await self._resolve_target_scope(selector)
                     try:
+                        from app.browser.page_search_ai import ensure_search_panel_for_selector
+
+                        await ensure_search_panel_for_selector(self.page, selector)
+                        await self.page.wait_for_timeout(400)
                         await target.fill(selector, val, timeout=min(timeout_ms, 4000))
                         try:
                             await target.locator(selector).first.dispatch_event("input")
@@ -373,7 +494,14 @@ class PlaywrightStepRunner:
                             )
                         except Exception:
                             pass
+                        self._last_fill_selector = selector
                         await self.page.wait_for_timeout(800)
+                        qt = (context_vars.get("active_query_type") or "").lower()
+                        wrong_field = qt == "address" and self._selector_looks_wrong_for_address(selector)
+                        missing_val = qt == "address" and not await self._field_contains_value(selector, val)
+                        if qt == "address" and (wrong_field or missing_val):
+                            if await self._fill_address_field_fallbacks(val, context_vars):
+                                pass
                     except Exception as fill_err:
                         logger.warning("Direct fill for %s failed (%s), attempting dynamic selector fallback", selector, fill_err)
                         fallbacks = []
@@ -395,7 +523,13 @@ class PlaywrightStepRunner:
                                 'input[placeholder*="owner" i]', 'input[placeholder*="Enter Owner" i]',
                                 'input[formcontrolname*="owner" i]', 'input[name*="owner" i]', '#OwnerLine1',
                             ]
-                        fallbacks.extend(['input[type="text"]:visible', 'input[type="search"]:visible'])
+                        elif "enter address" in sel_lower or 'placeholder="enter address' in sel_lower:
+                            fallbacks = [
+                                'input[placeholder*="enter address" i]',
+                                'input[aria-label*="Location Address" i]',
+                                'input[id*="txtAddress" i]',
+                                'input[name*="txtAddress" i]',
+                            ]
 
                         filled_fb = False
                         for fb in fallbacks:
@@ -408,6 +542,7 @@ class PlaywrightStepRunner:
                                             await scope.locator(fb).first.dispatch_event("change")
                                         except Exception:
                                             pass
+                                        self._last_fill_selector = fb
                                         filled_fb = True
                                         logger.info("Successfully filled fallback selector %s", fb)
                                         await self.page.wait_for_timeout(800)
@@ -457,9 +592,76 @@ class PlaywrightStepRunner:
                     target = await self._resolve_target_scope(selector)
                     desc_lower = str(step.get("description", "")).lower()
                     sel_lower = selector.lower()
+                    is_search_submit = any(
+                        k in desc_lower or k in sel_lower
+                        for k in ("search", "submit", "btnsarch", "btnsearch")
+                    )
                     is_tab = "tab" in sel_lower or "ui-id-" in sel_lower or "tab" in desc_lower
 
-                    if is_tab:
+                    clicked = False
+                    qt_submit = (context_vars.get("active_query_type") or "").lower()
+                    query_val = (
+                        (context_vars.get("input") or {}).get("address")
+                        or (context_vars.get("input") or {}).get("parcel_id")
+                        or (context_vars.get("input") or {}).get("owner_name")
+                        or ""
+                    )
+                    submit_fill_sel = await self._resolve_submit_fill_selector(qt_submit, str(query_val))
+                    if submit_fill_sel:
+                        self._last_fill_selector = submit_fill_sel
+                    if is_search_submit and self._last_fill_selector:
+                        try:
+                            from app.browser.page_search_ai import SINGLE_FIELD_SEARCH_PREP_JS
+
+                            for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
+                                try:
+                                    await scope.evaluate(
+                                        SINGLE_FIELD_SEARCH_PREP_JS,
+                                        self._last_fill_selector,
+                                    )
+                                    break
+                                except Exception:
+                                    continue
+                        except Exception as prep_err:
+                            logger.debug("Single-field search prep note: %s", prep_err)
+
+                    if is_search_submit:
+                        await self._dismiss_disclaimer_if_present()
+                        try:
+                            btn = target.locator(selector).first
+                            await btn.click(force=True, timeout=min(timeout_ms, 5000))
+                            clicked = True
+                            logger.info("Clicked search submit control %s", selector)
+                        except Exception as click_primary_err:
+                            logger.debug("Primary search click %s: %s", selector, click_primary_err)
+                            try:
+                                await target.locator(selector).first.evaluate(
+                                    "el => { el.click(); if (typeof el.form?.requestSubmit === 'function') el.form.requestSubmit(el); }"
+                                )
+                                clicked = True
+                            except Exception:
+                                pass
+
+                    if not clicked and is_search_submit and self._last_fill_selector:
+                        try:
+                            from app.browser.page_search_ai import PAIR_SUBMIT_CLICK_JS
+
+                            for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
+                                try:
+                                    paired = await scope.evaluate(PAIR_SUBMIT_CLICK_JS, self._last_fill_selector)
+                                    if paired:
+                                        clicked = True
+                                        logger.info(
+                                            "Clicked Search in same panel as filled input %s",
+                                            self._last_fill_selector,
+                                        )
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception as pair_err:
+                            logger.debug("Paired panel Search click note: %s", pair_err)
+
+                    if not clicked and is_tab:
                         # Extract target tab panel id if present (e.g., #TabParcel, #TabAddress, #TabOwner)
                         tab_match = re.search(r'#Tab([a-zA-Z0-9_]+)', selector, re.I)
                         target_panel_id = f"Tab{tab_match.group(1)}" if tab_match else None
@@ -515,7 +717,7 @@ class PlaywrightStepRunner:
                                     pass
                             await target.click(selector, force=True, timeout=5000)
                         await self.page.wait_for_timeout(600)
-                    else:
+                    elif not clicked:
                         try:
                             await target.click(selector, timeout=timeout_ms)
                         except Exception as click_err:
@@ -526,11 +728,29 @@ class PlaywrightStepRunner:
                                     "Click on search button %s failed (%s). Attempting fallback search buttons or Enter key.",
                                     selector, click_err
                                 )
-                                fallback_btns = [
-                                    'button:has-text("Search")', 'button[type="submit"]', 'input[type="submit"]',
-                                    '[aria-label*="search" i]', 'button.btn-primary', 'a:has-text("Search")'
-                                ]
                                 clicked_fb = False
+                                if self._last_fill_selector:
+                                    try:
+                                        from app.browser.page_search_ai import PAIR_SUBMIT_CLICK_JS
+
+                                        for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
+                                            paired = await scope.evaluate(PAIR_SUBMIT_CLICK_JS, self._last_fill_selector)
+                                            if paired:
+                                                clicked_fb = True
+                                                break
+                                    except Exception:
+                                        pass
+                                fallback_btns = [
+                                    '#search',
+                                    'div#search[role="button"]',
+                                    '[role="button"]:has-text("Search")',
+                                    'input[type="submit"][value*="Search" i]',
+                                    'input[type="button"][value*="Search" i]',
+                                    'button[type="submit"]',
+                                    'input[type="submit"]',
+                                    'a[id*="btnSearch" i]',
+                                    'button.btn-primary',
+                                ]
                                 for fb in fallback_btns:
                                     for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
                                         try:
@@ -544,6 +764,38 @@ class PlaywrightStepRunner:
                                             continue
                                     if clicked_fb:
                                         break
+                                if not clicked_fb:
+                                    try:
+                                        from app.extraction.tax_collector_reports import TAX_UNIFIED_SUBMIT_JS
+
+                                        for scope in [self.page, *[f for f in self.page.frames if f != self.page.main_frame]]:
+                                            pick = await scope.evaluate(TAX_UNIFIED_SUBMIT_JS)
+                                            if pick and pick.get("selector"):
+                                                loc = scope.locator(pick["selector"]).first
+                                                if await loc.count() > 0 and await loc.is_visible(timeout=800):
+                                                    await loc.click(force=True, timeout=3000)
+                                                    clicked_fb = True
+                                                    logger.info(
+                                                        "Clicked dynamically scored Search control %s",
+                                                        pick["selector"],
+                                                    )
+                                                    break
+                                    except Exception as dyn_submit_err:
+                                        logger.debug("Dynamic Search submit fallback: %s", dyn_submit_err)
+                                if not clicked_fb:
+                                    try:
+                                        from app.browser.page_search_ai import INVOKE_PORTAL_SUBMIT_JS
+
+                                        for scope in [
+                                            self.page,
+                                            *[f for f in self.page.frames if f != self.page.main_frame],
+                                        ]:
+                                            if await scope.evaluate(INVOKE_PORTAL_SUBMIT_JS):
+                                                clicked_fb = True
+                                                logger.info("Invoked portal submitForm / #search control")
+                                                break
+                                    except Exception as portal_submit_err:
+                                        logger.debug("Portal submitForm fallback: %s", portal_submit_err)
                                 if not clicked_fb:
                                     try:
                                         await self.page.keyboard.press("Enter")
@@ -572,26 +824,125 @@ class PlaywrightStepRunner:
                 elif action == "click_if_visible":
                     target = await self._resolve_target_scope(selector)
                     clicked_civ = False
-                    for scope in [target, self.page, *self.page.frames]:
+                    sel_lower_civ = (selector or "").lower()
+                    if "btnheadertoggle" in sel_lower_civ:
+                        from app.browser.page_search_ai import ensure_search_panel_for_selector
+
+                        if await ensure_search_panel_for_selector(self.page, selector):
+                            await self.page.wait_for_timeout(450)
+                        continue
+                    parcel_q = (
+                        str((context_vars.get("input") or {}).get("parcel_id") or "")
+                        .strip()
+                    )
+                    address_q = (
+                        str((context_vars.get("input") or {}).get("address") or "")
+                        .strip()
+                    )
+                    step_desc = str(step.get("description") or "").lower()
+                    is_result_nav = any(
+                        k in step_desc
+                        for k in (
+                            "result",
+                            "parcel",
+                            "property appraisal",
+                            "matching",
+                            "detail",
+                            "record",
+                        )
+                    )
+
+                    from app.browser.property_capture_prep import is_gis_portal_url
+
+                    gis_parcel_open = (
+                        parcel_q
+                        and is_gis_portal_url(self.page.url or "")
+                        and "disclaimer" not in step_desc
+                        and "agree" not in step_desc
+                        and (is_result_nav or "result" in selector.lower() or "tbody tr" in selector.lower())
+                    )
+                    if gis_parcel_open:
                         try:
-                            for s in [selector, *selector.split(",")]:
+                            from app.browser.property_capture_prep import open_gis_search_result_row
+
+                            gis_click = await open_gis_search_result_row(
+                                self.page,
+                                parcel_q,
+                                query_type=str(context_vars.get("active_query_type") or "parcel"),
+                                workflow_run_id=str(self.run_id),
+                                node_id=str(self.node_id),
+                            )
+                            if gis_click.get("clicked"):
+                                clicked_civ = True
+                                step["description"] = gis_click.get("description") or step.get("description")
+                                step_desc = step["description"]
+                        except Exception as gis_err:
+                            logger.debug("GIS parcel row open note: %s", gis_err)
+
+                    preferred: list[str] = []
+                    if parcel_q:
+                        preferred.extend(
+                            [
+                                f'a:has-text("{parcel_q}")',
+                                f'td a:has-text("{parcel_q}")',
+                                f'td:has-text("{parcel_q}")',
+                                f'tr:has-text("{parcel_q}") a',
+                            ]
+                        )
+                    if address_q:
+                        street = address_q.split(",")[0].strip()
+                        if street:
+                            preferred.append(f'tr:has-text("{street}") a')
+                            preferred.append(f'a:has-text("{street}")')
+
+                    generic_parts = [p.strip() for p in selector.split(",") if p.strip()]
+                    blocked_generic = (
+                        "table tbody tr",
+                        "table tbody tr:first-child",
+                        "table tbody tr td:nth-child(2)",
+                        "table tr:not(:first-child) td a",
+                    )
+                    generic_parts = [p for p in generic_parts if p not in blocked_generic]
+                    selector_list = preferred + generic_parts if not clicked_civ else []
+                    for scope in ([target, self.page, *self.page.frames] if not clicked_civ else []):
+                        try:
+                            for s in selector_list:
                                 s_clean = s.strip()
                                 if not s_clean:
                                     continue
                                 loc = scope.locator(s_clean).first
-                                if await loc.count() > 0 and await loc.is_visible(timeout=min(1200, timeout_ms)):
+                                if await loc.count() == 0 or not await loc.is_visible(timeout=min(1200, timeout_ms)):
+                                    continue
+                                try:
+                                    cell_text = (await loc.inner_text(timeout=1200) or "").strip()
+                                except Exception:
+                                    cell_text = ""
+                                low = cell_text.lower()
+                                if parcel_q and parcel_q not in cell_text:
+                                    if any(
+                                        k in low
+                                        for k in (
+                                            "certified values",
+                                            "property appraiser 20",
+                                            "beta off",
+                                            "record search",
+                                        )
+                                    ):
+                                        continue
+                                try:
+                                    await loc.evaluate(
+                                        "el => { el.click(); if (typeof el.onclick === 'function') { el.onclick(); } }"
+                                    )
+                                    clicked_civ = True
+                                except Exception:
                                     try:
-                                        await loc.evaluate("el => { el.click(); if (typeof el.onclick === 'function') { el.onclick(); } }")
+                                        await loc.click(force=True, timeout=2500)
                                         clicked_civ = True
                                     except Exception:
-                                        try:
-                                            await loc.click(force=True, timeout=2500)
-                                            clicked_civ = True
-                                        except Exception:
-                                            pass
-                                    if clicked_civ:
-                                        await self.page.wait_for_timeout(1000)
-                                        break
+                                        pass
+                                if clicked_civ:
+                                    await self.page.wait_for_timeout(1000)
+                                    break
                             if clicked_civ:
                                 break
                         except Exception:
@@ -612,7 +963,29 @@ class PlaywrightStepRunner:
                 elif action == "select":
                     # Support value, label, or index
                     target = await self._resolve_target_scope(selector)
-                    if "value" in step:
+                    if step.get("auto_tax_year"):
+                        loc = target.locator(selector).first
+                        if await loc.count() > 0:
+                            from app.browser.page_search_ai import PICK_TAX_YEAR_JS
+                            meta = await target.evaluate(PICK_TAX_YEAR_JS)
+                            preferred = int(meta.get("preferred") or meta.get("nowYear") or 2026)
+                            await loc.evaluate(
+                                """(el, preferredYear) => {
+                                    const opts = Array.from(el.options || []);
+                                    let best = null, bestY = -1;
+                                    for (const o of opts) {
+                                        const y = parseInt((o.value || o.textContent || '').trim(), 10);
+                                        if (!y || y > preferredYear) continue;
+                                        if (y > bestY) { bestY = y; best = o; }
+                                    }
+                                    if (!best && opts.length) best = opts[0];
+                                    if (!best) return;
+                                    el.value = best.value;
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                }""",
+                                preferred,
+                            )
+                    elif "value" in step:
                         val = self._interpolate_value(step.get("value", ""), context_vars)
                         await target.select_option(selector, value=val, timeout=timeout_ms)
                     elif "label" in step:
@@ -669,7 +1042,18 @@ class PlaywrightStepRunner:
                             break
                         await asyncio.sleep(0.3)
                     if not found:
-                        await self.page.wait_for_selector(raw_candidates[0] if raw_candidates else selector, state=target_state, timeout=1000)
+                        if step.get("optional") is True:
+                            logger.info(
+                                "Optional wait_for_selector did not find '%s' within %sms — continuing",
+                                selector,
+                                timeout_ms,
+                            )
+                        else:
+                            await self.page.wait_for_selector(
+                                raw_candidates[0] if raw_candidates else selector,
+                                state=target_state,
+                                timeout=min(3000, timeout_ms),
+                            )
 
                 elif action == "wait_for_load_state":
                     load_state = step.get("state", "domcontentloaded")
@@ -696,6 +1080,22 @@ class PlaywrightStepRunner:
                     )
                 except Exception:
                     pass
+
+                try:
+                    from app.browser.step_verifier_ai import verify_and_recover_after_step
+
+                    await verify_and_recover_after_step(
+                        self.page,
+                        action=action,
+                        step_desc=step_desc,
+                        step_index=idx,
+                        context_vars=context_vars,
+                        workflow_run_id=str(self.run_id),
+                        node_id=str(self.node_id),
+                        use_ai=True,
+                    )
+                except Exception as ver_err:
+                    logger.debug("Step verify note: %s", ver_err)
 
                 # Step-by-step deliberate pacing delay between actions so steps are stable and observable
                 await self.page.wait_for_timeout(800)
@@ -753,6 +1153,37 @@ class PlaywrightStepRunner:
         # ---------------------------------------------------------------------
         extracted_results: dict[str, Any] = {}
 
+        pre_query_val = (
+            context_vars.get("input", {}).get("parcel_id")
+            or context_vars.get("input", {}).get("address")
+            or context_vars.get("input", {}).get("owner_name")
+            or ""
+        )
+        pre_query_type = (
+            context_vars.get("active_query_type")
+            or ("address" if context_vars.get("input", {}).get("address") else None)
+            or ("owner" if context_vars.get("input", {}).get("owner_name") else None)
+            or "parcel"
+        )
+
+        from app.browser.property_capture_prep import (
+            is_gis_portal_url,
+            open_gis_search_result_row,
+            wait_for_property_detail_ready,
+        )
+
+        if pre_query_val and is_gis_portal_url(self.page.url or ""):
+            if not await wait_for_property_detail_ready(self.page, query_value=str(pre_query_val), timeout_ms=2500):
+                opened = await open_gis_search_result_row(
+                    self.page,
+                    str(pre_query_val),
+                    query_type=str(pre_query_type),
+                    workflow_run_id=str(self.run_id),
+                    node_id=str(self.node_id),
+                )
+                if opened.get("clicked"):
+                    logger.info("GIS parcel detail before extract: %s", opened.get("description"))
+
         # If table settings are configured, extract table rows
         if table_settings and (table_settings.get("table_selector") or table_settings.get("row_selector")):
             records = await self.extractor.extract_table_results(
@@ -776,43 +1207,63 @@ class PlaywrightStepRunner:
                     extracted_results[k] = v
 
         # Check if search returned a results list/table and click matching parcel number or detail link
-        query_val = context_vars.get("input", {}).get("parcel_id") or context_vars.get("input", {}).get("address") or ""
+        query_val = (
+            context_vars.get("input", {}).get("parcel_id")
+            or context_vars.get("input", {}).get("address")
+            or context_vars.get("input", {}).get("owner_name")
+            or ""
+        )
+        query_type = (
+            context_vars.get("active_query_type")
+            or ("address" if context_vars.get("input", {}).get("address") else None)
+            or ("owner" if context_vars.get("input", {}).get("owner_name") else None)
+            or "parcel"
+        )
         owner_val = str(extracted_results.get("owner_name") or "").strip().upper()
         dummy_owners = {"", "NONE", "NULL", "N/A", "UNKNOWN", "OWNER OF RECORD", "OWNER", "AND", "OR"}
         has_genuine_owner = bool(owner_val and owner_val not in dummy_owners)
 
-        if not has_genuine_owner or not extracted_results.get("property_address"):
-            try:
-                from app.browser.result_selector_ai import detect_and_click_result_link_ai
-                res_click = await detect_and_click_result_link_ai(
+        from app.browser.property_capture_prep import (
+            is_gis_portal_url,
+            open_gis_search_result_row,
+            wait_for_property_detail_ready,
+        )
+
+        from app.browser.property_capture_prep import page_is_search_results_listing
+
+        on_results_listing = await page_is_search_results_listing(self.page)
+        detail_ready = await wait_for_property_detail_ready(
+            self.page, query_value=str(query_val or ""), timeout_ms=2500
+        )
+        needs_result_click = on_results_listing or (
+            not detail_ready and (not has_genuine_owner or not extracted_results.get("property_address"))
+        )
+        if needs_result_click:
+            if query_val and is_gis_portal_url(self.page.url or ""):
+                gis_open = await open_gis_search_result_row(
                     self.page,
-                    query_value=query_val,
+                    str(query_val),
+                    query_type=query_type,
                     workflow_run_id=str(self.run_id),
                     node_id=str(self.node_id),
                 )
-                if res_click.get("clicked"):
-                    await self.page.wait_for_timeout(2000)
-            except Exception as res_err:
-                logger.debug("Step runner result selector note: %s", res_err)
-
-            # Direct fallback for table cell links (Knockout goToPin, td.link, etc.)
-            for scope in [self.page] + [f for f in self.page.frames if f != self.page.main_frame]:
+                if gis_open.get("clicked"):
+                    logger.info("GIS search result opened: %s", gis_open.get("description"))
+            else:
                 try:
-                    detail_link = scope.locator(
-                        'td.link, td[data-bind*="goTo"], td[data-bind*="goToPin"], '
-                        'table tbody tr:first-child td.link, table tbody tr td.pointer, '
-                        'a[href*="RecordDetail"], a[href*="FolioID"], a[href*="parceldetail"], #flex1 tr.jqgrow a'
-                    ).first
-                    if await detail_link.count() > 0 and await detail_link.is_visible(timeout=1500):
-                        logger.info("Auto-following property detail link or cell...")
-                        try:
-                            await detail_link.click(force=True, timeout=3000)
-                        except Exception:
-                            await detail_link.evaluate("el => el.click()")
-                        await self.page.wait_for_timeout(2500)
-                        break
-                except Exception:
-                    continue
+                    from app.browser.result_selector_ai import detect_and_click_result_link_ai
+
+                    res_click = await detect_and_click_result_link_ai(
+                        self.page,
+                        query_value=query_val,
+                        query_type=query_type,
+                        workflow_run_id=str(self.run_id),
+                        node_id=str(self.node_id),
+                    )
+                    if res_click.get("clicked"):
+                        await self.page.wait_for_timeout(2000)
+                except Exception as res_err:
+                    logger.debug("Step runner result selector note: %s", res_err)
 
         # Universal county property DOM evaluation if primary fields still missing
         if not extracted_results.get("owner_name") or not extracted_results.get("property_address"):
@@ -823,8 +1274,16 @@ class PlaywrightStepRunner:
                     if dom_data and isinstance(dom_data, dict):
                         if not extracted_results.get("owner_name") and dom_data.get("owner name"):
                             extracted_results["owner_name"] = dom_data["owner name"]
-                        if not extracted_results.get("property_address") and dom_data.get("site address"):
-                            extracted_results["property_address"] = dom_data["site address"]
+                        from app.browser.property_capture_prep import is_map_ui_noise, sanitize_extracted_record
+
+                        site = dom_data.get("site address")
+                        if not extracted_results.get("property_address") and site and not is_map_ui_noise(str(site)):
+                            extracted_results["property_address"] = site
+                        extracted_results = sanitize_extracted_record(
+                            extracted_results,
+                            query_value=str(context_vars.get("input", {}).get("parcel_id") or context_vars.get("input", {}).get("address") or ""),
+                            query_type=str(context_vars.get("active_query_type") or "parcel"),
+                        )
                         if not extracted_results.get("parcel_number") and dom_data.get("parcel id"):
                             extracted_results["parcel_number"] = dom_data["parcel id"]
                         if not extracted_results.get("assessed_value") and (dom_data.get("assessed value") or dom_data.get("market value")):
@@ -834,13 +1293,25 @@ class PlaywrightStepRunner:
                 except Exception:
                     continue
 
-        # Mistral Document AI OCR visual extraction if fields still missing
-        if not extracted_results.get("owner_name") or not extracted_results.get("property_address"):
+        # Mistral Document AI OCR visual extraction if fields still missing (once per run)
+        need_ocr = (
+            not extracted_results.get("ocr_markdown")
+            and (
+                not extracted_results.get("owner_name")
+                or not extracted_results.get("property_address")
+            )
+        )
+        if need_ocr:
             try:
                 from app.extraction.mistral_webpage_ocr import get_mistral_webpage_ocr
                 ocr_srv = get_mistral_webpage_ocr()
                 if ocr_srv.is_enabled():
-                    ocr_res = await ocr_srv.extract_from_page(self.page)
+                    query_val = str(
+                        (context_vars.get("input") or {}).get("parcel_id")
+                        or (context_vars.get("input") or {}).get("address")
+                        or ""
+                    )
+                    ocr_res = await ocr_srv.extract_from_page(self.page, query_value=query_val)
                     for k in [
                         "parcel_number", "owner_name", "property_address", "mailing_address",
                         "legal_description", "property_use", "taxing_district", "land_size",
@@ -854,4 +1325,10 @@ class PlaywrightStepRunner:
             except Exception:
                 pass
 
-        return extracted_results
+        from app.browser.property_capture_prep import finalize_assessor_extraction
+
+        return finalize_assessor_extraction(
+            extracted_results,
+            query_value=str(pre_query_val or ""),
+            query_type=str(pre_query_type or "parcel"),
+        )

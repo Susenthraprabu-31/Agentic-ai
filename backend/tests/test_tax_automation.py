@@ -5,10 +5,28 @@ from app.extraction.tax_collector_reports import (
     is_tax_collector_portal,
     extract_tax_collector_record,
     _clean_storage_key,
+    _tax_collector_detail_url,
+    run_tax_collector_unified_search,
+    ensure_tax_collector_search_page,
+    record_has_tax_collector_identity,
+    _unique_tax_years_sorted_desc,
+    years_from_account_history,
 )
+from app.browser.page_search_ai import build_search_fills
 from app.models.document_artifact import DocumentArtifact, DocumentStatus
 from app.workflow_engine.execution_context import ExecutionContext
 from app.workflow_engine.node_executor import TaxNodeExecutor, NormalizeNodeExecutor
+
+
+def test_tax_collector_detail_url_detection():
+    assert _tax_collector_detail_url(
+        "https://example-taxcollector.com/Property/TaxBill#DelinquentHistory"
+    )
+    assert _tax_collector_detail_url("https://county-taxes.net/fl-example/property-tax/account/12345")
+    assert not _tax_collector_detail_url(
+        "https://example-taxcollector.com/Property/SearchSelect?Accept=true&ClearData=True"
+    )
+    assert not _tax_collector_detail_url("https://county-taxes.net/fl-example/property-tax")
 
 
 def test_is_tax_collector_portal():
@@ -22,6 +40,48 @@ def test_is_tax_collector_portal():
 def test_clean_storage_key():
     assert _clean_storage_key("30-4009-094-0050") == "30-4009-094-0050"
     assert _clean_storage_key("Miami-Dade/Tax 2026") == "Miami-Dade_Tax_2026"
+
+
+def test_build_search_fills_county_taxes_unified_box():
+    snap = {
+        "url": "https://county-taxes.net/fl-example/property-tax",
+        "title": "Property Tax",
+        "elements": [
+            {
+                "kind": "input",
+                "id": "accountSearch",
+                "selector": "#accountSearch",
+                "placeholder": "Name, Address, Account Number, Folio Number, etc.",
+                "label": "Search",
+            }
+        ],
+    }
+    fills = build_search_fills(snap, "address", "9381 SW 21 TER")
+    assert len(fills) == 1
+    assert fills[0]["selector"] == "#accountSearch"
+    assert fills[0]["value"] == "9381 SW 21 TER"
+
+
+def test_tax_collector_search_helpers_exported():
+    assert callable(run_tax_collector_unified_search)
+    assert callable(ensure_tax_collector_search_page)
+
+
+def test_record_has_tax_collector_identity():
+    assert record_has_tax_collector_identity({"owner_name": "MARIA C MARRERO", "account_number": "30-4009-096-0060"})
+    assert not record_has_tax_collector_identity({"owner_name": "OWNER OF RECORD"})
+    assert not record_has_tax_collector_identity(None)
+
+
+def test_tax_year_index_helpers():
+    history = [
+        {"year": "2024", "bill": "2024 Annual Bill"},
+        {"year": "2026", "bill": "2026 Annual Bill"},
+        {"year": "2025", "bill": "2025 Annual Bill"},
+        {"year": "2026", "bill": "2026 Annual Bill duplicate"},
+    ]
+    assert years_from_account_history(history) == ["2026", "2025", "2024"]
+    assert _unique_tax_years_sorted_desc(["2019", "2021", "2020", "2021"]) == ["2021", "2020", "2019"]
 
 
 @pytest.mark.asyncio

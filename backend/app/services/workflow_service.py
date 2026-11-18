@@ -32,8 +32,8 @@ DEFAULT_WORKFLOW_DEFINITION: dict[str, Any] = {
             "position": {"x": 100, "y": 200},
             "data": {
                 "label": "Property Search Input",
-                "required_params": ["parcel_id"],
-                "optional_params": ["address", "owner_name"],
+                "required_params": [],
+                "optional_params": ["parcel_id", "address", "owner_name"],
             },
         },
         {

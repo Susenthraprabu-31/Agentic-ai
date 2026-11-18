@@ -160,13 +160,27 @@ async def download_universal_assessor_reports(
     page: Page,
     parcel_id: str,
     county_name: str = "County",
+    *,
+    query_value: str = "",
 ) -> list[dict[str, Any]]:
     """
     Capture official Assessor property card or summary report PDF dynamically for ANY county portal.
     Handles portal-specific print popups if present, or renders a high-fidelity print PDF of the
     active property details page.
     """
-    clean_id = _clean_storage_key(parcel_id)
+    from app.browser.property_capture_prep import (
+        DISCLAIMER_HINT,
+        is_plausible_parcel_id,
+        prepare_property_detail_view,
+    )
+
+    effective_parcel = parcel_id
+    if query_value and not is_plausible_parcel_id(str(parcel_id), query_value):
+        effective_parcel = query_value
+    elif query_value and not parcel_id:
+        effective_parcel = query_value
+
+    clean_id = _clean_storage_key(effective_parcel)
     dest_dir = get_assessor_storage_dir(clean_id)
     url_lower = (page.url or "").lower()
 
@@ -182,25 +196,127 @@ async def download_universal_assessor_reports(
         if c_doc:
             return [c_doc]
 
+    try:
+        from app.browser.property_capture_prep import is_gis_portal_url
+
+        await prepare_property_detail_view(page, query_value=query_value or effective_parcel)
+    except Exception as prep_err:
+        logger.debug("Assessor PDF prep note: %s", prep_err)
+
     # 3. Universal County Assessor Card PDF generation for any county
     pdf_path = dest_dir / f"assessor_card_{clean_id}.pdf"
-    if pdf_path.exists() and pdf_path.stat().st_size > 1000:
-        return [{
-            "document_type": "Assessor Property Card",
-            "document_title": f"Assessor Property Card - {clean_id}.pdf",
-            "file_path": str(pdf_path),
-            "source_url": page.url,
-            "document_url": page.url,
-        }]
+    png_path = dest_dir / f"assessor_card_{clean_id}.png"
 
     try:
-        await page.emulate_media(media="print")
-        await page.pdf(
-            path=str(pdf_path),
-            format="Letter",
-            print_background=True,
-            margin={"top": "0.25in", "right": "0.25in", "bottom": "0.25in", "left": "0.25in"},
+        from app.browser.property_capture_prep import (
+            capture_assessor_pdf_best_effort,
+            capture_detail_screenshot_bytes,
+            capture_property_detail_png_bytes,
+            ensure_property_detail_workspace,
+            is_standalone_parcel_detail_url,
+            render_assessor_detail_pdf_playwright,
+            try_gis_official_document_downloads,
         )
+
+        qv = query_value or effective_parcel
+        out_docs: list[dict[str, Any]] = []
+
+        from app.browser.property_capture_prep import pdf_bytes_looks_valid
+
+        if pdf_path.exists():
+            try:
+                cached = pdf_path.read_bytes()
+                if not pdf_bytes_looks_valid(cached, qv):
+                    logger.warning("Removing stale invalid assessor PDF cache: %s", pdf_path)
+                    pdf_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if is_gis_portal_url(url_lower):
+            out_docs = await try_gis_official_document_downloads(
+                page, dest_dir, clean_id, query_value=qv
+            )
+            if out_docs:
+                logger.info("GIS official document downloads: %d file(s)", len(out_docs))
+                return out_docs
+
+        if pdf_path.exists() and pdf_path.stat().st_size > 15000 and not is_gis_portal_url(url_lower):
+            return [{
+                "document_type": "Assessor Property Card",
+                "document_title": f"Assessor Property Card - {clean_id}.pdf",
+                "file_path": str(pdf_path),
+                "source_url": page.url,
+                "document_url": page.url,
+            }]
+
+        saved_pdf = False
+        if is_gis_portal_url(url_lower):
+            logger.info("GIS assessor capture: Playwright PDF render (skipping Print toolbar)")
+            saved_pdf = await render_assessor_detail_pdf_playwright(page, pdf_path, query_value=qv)
+        else:
+            await ensure_property_detail_workspace(page, qv)
+            if is_standalone_parcel_detail_url(page.url or ""):
+                png_bytes = await capture_detail_screenshot_bytes(page, query_value=qv)
+                if png_bytes and len(png_bytes) > 4000:
+                    png_path.write_bytes(png_bytes)
+                    logger.info(
+                        "Assessor card from standalone parcel detail screenshot (%d bytes)",
+                        len(png_bytes),
+                    )
+                    return [{
+                        "document_type": "Assessor Property Card",
+                        "document_title": f"Assessor Property Card - {clean_id}.png",
+                        "file_path": str(png_path),
+                        "source_url": page.url,
+                        "document_url": page.url,
+                        "mime_type": "image/png",
+                    }]
+            saved_pdf = await capture_assessor_pdf_best_effort(
+                page, pdf_path, query_value=qv
+            )
+
+        if saved_pdf and pdf_path.exists():
+            raw = pdf_path.read_bytes()
+            if pdf_bytes_looks_valid(raw, qv) and len(raw) > 3500:
+                out_docs.append({
+                    "document_type": "Assessor Property Card",
+                    "document_title": f"Assessor Property Card - {clean_id}.pdf",
+                    "file_path": str(pdf_path),
+                    "source_url": page.url,
+                    "document_url": page.url,
+                })
+                return out_docs
+            pdf_path.unlink(missing_ok=True)
+
+        wrote = False
+        from app.browser.property_capture_prep import capture_detail_screenshot_bytes
+
+        png_bytes = await capture_detail_screenshot_bytes(page, query_value=qv)
+        if png_bytes and len(png_bytes) > 4000:
+            png_path.write_bytes(png_bytes)
+            logger.info("Assessor card saved from property detail screenshot (%d bytes)", len(png_bytes))
+            return [{
+                "document_type": "Assessor Property Card",
+                "document_title": f"Assessor Property Card - {clean_id}.png",
+                "file_path": str(png_path),
+                "source_url": page.url,
+                "document_url": page.url,
+                "mime_type": "image/png",
+            }]
+        if not wrote:
+            try:
+                body_text = (await page.locator("body").inner_text(timeout=4000))[:2000]
+                if DISCLAIMER_HINT.search(body_text):
+                    logger.warning("Skipping assessor full-page PDF: disclaimer still visible")
+                    return []
+            except Exception:
+                pass
+            await page.pdf(
+                path=str(pdf_path),
+                format="Letter",
+                print_background=True,
+                margin={"top": "0.25in", "right": "0.25in", "bottom": "0.25in", "left": "0.25in"},
+            )
         if pdf_path.exists() and pdf_path.stat().st_size > 1000:
             logger.info("Generated universal Assessor Property Card PDF for %s: %s (%d bytes)", parcel_id, pdf_path, pdf_path.stat().st_size)
             return [{
@@ -259,7 +375,10 @@ async def register_downloaded_documents(
                 sha256 = hashlib.sha256(file_bytes).hexdigest()
                 stored_name = f"{doc_id}_{fpath.name}"
                 ext = fpath.suffix.lstrip(".").lower() or "pdf"
-                mime = "image/png" if ext == "png" else ("image/jpeg" if ext in ["jpg", "jpeg"] else "application/pdf")
+                mime = (
+                    d.get("mime_type")
+                    or ("image/png" if ext == "png" else ("image/jpeg" if ext in ["jpg", "jpeg"] else "application/pdf"))
+                )
                 persistent_key = DocumentStorage.generate_storage_key(
                     workflow_run_id, property_record_id, doc_id, extension=ext
                 )

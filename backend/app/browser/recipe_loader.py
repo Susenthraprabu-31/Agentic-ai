@@ -37,6 +37,11 @@ class ResolvedRecipe:
     table_settings: dict[str, Any] = field(default_factory=dict)
     source_configuration_id: uuid.UUID | None = None
     detail_page_config: dict[str, Any] = field(default_factory=dict)
+    county_source_id: uuid.UUID | None = None
+    definition: dict[str, Any] = field(default_factory=dict)
+    portal_hostname: str = ""
+    portal_type: str = ""
+    is_published: bool = False
 
 
 class RecipeLoader:
@@ -332,6 +337,20 @@ class RecipeLoader:
             else f"{record_type}_source_config_{source_config.id if source_config else 'custom'}"
         )
 
+        meta = definition.get("metadata") or {}
+        cs_id = None
+        if recipe_version and recipe_version.recipe:
+            cs_id = recipe_version.recipe.county_source_id
+        elif source_config:
+            cs_id = source_config.county_source_id
+
+        from urllib.parse import urlparse
+
+        portal_hostname = meta.get("portal_hostname") or ""
+        if not portal_hostname:
+            portal_hostname = (urlparse(website_url or search_page_url).hostname or "").lower()
+        portal_type = meta.get("portal_type") or ""
+
         return ResolvedRecipe(
             recipe_id=recipe_version.recipe_id if recipe_version else None,
             recipe_version_id=recipe_version.id if recipe_version else None,
@@ -346,6 +365,11 @@ class RecipeLoader:
             table_settings=table_settings,
             source_configuration_id=source_config.id if source_config else None,
             detail_page_config=detail_page_config,
+            county_source_id=cs_id,
+            definition=definition,
+            portal_hostname=portal_hostname,
+            portal_type=portal_type,
+            is_published=bool(recipe_version.is_published) if recipe_version else False,
         )
 
     def _synthesize_steps_from_config(

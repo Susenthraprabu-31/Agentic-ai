@@ -47,6 +47,40 @@ export interface DocumentOcrAnalysisResult {
   error?: string | null;
 }
 
+export async function extractApiErrorMessage(err: unknown, fallback: string): Promise<string> {
+  const ax = err as { response?: { data?: unknown } };
+  const data = ax.response?.data;
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text();
+      const parsed = JSON.parse(text) as { detail?: string };
+      if (typeof parsed.detail === "string") {
+        return parsed.detail;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (data && typeof data === "object" && "detail" in data) {
+    const detail = (data as { detail?: string }).detail;
+    if (typeof detail === "string") {
+      return detail;
+    }
+  }
+  return fallback;
+}
+
+function triggerBrowserFileDownload(blob: Blob, filename: string): void {
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(url);
+}
+
 export const documentsApi = {
   /** Fetch paginated list of document artifacts */
   async list(params?: ListDocumentsParams): Promise<{ items: DocumentArtifact[]; total: number }> {
@@ -71,14 +105,7 @@ export const documentsApi = {
       ? res.headers["content-type"]
       : "application/pdf";
     const blob = new Blob([res.data], { type: contentType });
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename || `document_${id}.pdf`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
+    triggerBrowserFileDownload(blob, filename || `document_${id}.pdf`);
   },
 
   /** Fetch binary blob for inline document preview */

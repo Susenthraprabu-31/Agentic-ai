@@ -11,6 +11,14 @@ from app.workflow_engine.node_executor import get_node_executor
 
 logger = get_logger(__name__)
 
+_BROWSER_NODE_TYPES = frozenset({"assessor", "tax"})
+
+
+def _wave_uses_multiple_browser_nodes(wave: list[dict[str, Any]]) -> bool:
+    """Assessor and tax share one Playwright browser per worker — run them sequentially in a wave."""
+    browser_nodes = [n for n in wave if str(n.get("type", "")).lower() in _BROWSER_NODE_TYPES]
+    return len(browser_nodes) > 1
+
 
 class WorkflowScheduler:
     """Schedules and executes nodes wave-by-wave according to DAG dependencies."""
@@ -89,9 +97,16 @@ class WorkflowScheduler:
                     )
                 continue
 
-            # Execute wave concurrently
-            tasks = [self.execute_node(node) for node in wave]
-            await asyncio.gather(*tasks)
+            if _wave_uses_multiple_browser_nodes(wave):
+                logger.info(
+                    "Serializing assessor/tax browser nodes in wave %d (shared Playwright session)",
+                    wave_idx + 1,
+                )
+                for node in wave:
+                    await self.execute_node(node)
+            else:
+                tasks = [self.execute_node(node) for node in wave]
+                await asyncio.gather(*tasks)
 
         # Calculate final overall run status
         all_statuses = list(self.context.node_statuses.values())
