@@ -1,4 +1,4 @@
-# Title Search Platform
+﻿# Title Search Platform
 
 A production-ready web application for searching public property records (Assessor + Tax) across US county websites, using AI-assisted recipe generation and deterministic Playwright automation.
 
@@ -9,12 +9,12 @@ A production-ready web application for searching public property records (Assess
 
 ```
 titlemvp/
-├── frontend/     React + Vite + TypeScript SPA
-├── backend/      FastAPI + SQLAlchemy + Alembic
-├── docker/       PostgreSQL init + Nginx config
-├── docker-compose.yml
-├── docker-compose.override.yml   (dev overrides — auto-loaded)
-└── .env.example
+â”œâ”€â”€ frontend/     React + Vite + TypeScript SPA
+â”œâ”€â”€ backend/      FastAPI + SQLAlchemy + Alembic
+â”œâ”€â”€ docker/       PostgreSQL init + Nginx config
+â”œâ”€â”€ docker-compose.yml
+â”œâ”€â”€ docker-compose.override.yml   (dev overrides — auto-loaded)
+â””â”€â”€ .env.example
 ```
 
 **Key design principles:**
