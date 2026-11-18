@@ -2,6 +2,7 @@
 
 A production-ready web application for searching public property records (Assessor + Tax) across US county websites, using AI-assisted recipe generation and deterministic Playwright automation.
 
+
 ---
 
 ## Architecture Overview
@@ -329,5 +330,6 @@ npm run build
 
 Proprietary — All rights reserved.
 
-#   A g e n t i c - a i  
+#   A g e n t i c - a i 
+ 
  
