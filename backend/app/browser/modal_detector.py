@@ -7,6 +7,7 @@ executes the dismissal, and returns the discovered selector for saving into reci
 from __future__ import annotations
 
 import json
+import re
 import logging
 from typing import Any, Optional
 
@@ -216,6 +217,51 @@ Return ONLY valid JSON matching this schema:
 """
 
 
+def _looks_like_external_navigation(text: str, selector: str) -> bool:
+    """Reject modal 'dismiss' targets that are outbound links, not in-page actions."""
+    blob = f"{text} {selector}".lower()
+    if any(
+        k in blob
+        for k in (
+            "http://",
+            "https://",
+            "consenthub.",
+            ".gov/",
+            "mdctaxcollector.gov",
+            "www.",
+        )
+    ):
+        return True
+    if re.search(r"\b[a-z0-9-]+\.(gov|com|net|org)\b", blob):
+        if not any(k in blob for k in ("i agree", "accept", "continue", "close", "ok", "dismiss")):
+            return True
+        if "consent" in blob and "hub" in blob:
+            return True
+    sel = (selector or "").lower()
+    if sel.startswith("a:") or "a:has-text(" in sel:
+        if any(k in blob for k in ("consenthub", "attestation", "business tax receipt")):
+            return True
+    return False
+
+
+async def _locator_navigates_away(frame: Frame, selector: str, page_host: str) -> bool:
+    try:
+        loc = frame.locator(selector).first
+        if await loc.count() == 0:
+            return False
+        tag = (await loc.evaluate("el => (el.tagName || '').toLowerCase()") or "").strip()
+        if tag != "a":
+            return False
+        href = (await loc.get_attribute("href") or "").strip()
+        if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+            return False
+        if href.lower().startswith("http") and page_host and page_host not in href.lower():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def extract_modal_candidates(page: Page) -> list[dict[str, Any]]:
     """Inspects all frames on the page and extracts candidate modals and their interactive buttons."""
     all_candidates: list[dict[str, Any]] = []
@@ -272,6 +318,9 @@ async def detect_and_dismiss_modal_ai(
                 # Match explicit agreement (ensure not disagree)
                 if any(k in b_txt or k in b_aria for k in ["i agree", "agree", "accept", "continue", "proceed", "acknowledge", "understand"]):
                     if "disagree" in b_txt or "disagree" in b_aria:
+                        continue
+                    sel_candidate = b.get("selector") or ""
+                    if _looks_like_external_navigation(b.get("text") or "", sel_candidate):
                         continue
                     ai_data = {
                         "has_disclaimer": True,
@@ -351,9 +400,17 @@ async def detect_and_dismiss_modal_ai(
     if not ai_data.get("has_disclaimer") or not ai_data.get("dismiss_selector"):
         return {"has_disclaimer": False}
 
-    # Execute dismissal across target frame and any duplicate modal frames
     dismiss_selector = ai_data["dismiss_selector"]
     button_text = ai_data.get("dismiss_button_text") or "I agree, please continue"
+    if _looks_like_external_navigation(button_text, dismiss_selector):
+        logger.warning(
+            "Skipping modal dismiss — target looks like external navigation (%s / %s)",
+            button_text,
+            dismiss_selector,
+        )
+        return {"has_disclaimer": False, "skipped_external_navigation": True}
+
+    # Execute dismissal across target frame and any duplicate modal frames
     dialog_title = ai_data.get("dialog_title") or "Website Disclaimer"
     frame_idx = ai_data.get("frame_index", 0)
 
@@ -378,6 +435,14 @@ async def detect_and_dismiss_modal_ai(
         pass
 
     dismissed = False
+    page_host = ""
+    try:
+        from urllib.parse import urlparse
+
+        page_host = (urlparse(page.url or "").netloc or "").lower()
+    except Exception:
+        pass
+
     # Execute dismissal across all frames where this dismiss button or agreement input is present
     seen_frames = set()
     frames_to_check = [target_frame, *page.frames]
@@ -402,6 +467,9 @@ async def detect_and_dismiss_modal_ai(
                 "[data-test*='notifications-close']",
             ]:
                 try:
+                    if await _locator_navigates_away(f, s, page_host):
+                        logger.warning("Skipping modal click — selector navigates away from portal: %s", s)
+                        continue
                     loc = f.locator(s).first
                     if await loc.count() > 0:
                         try:
