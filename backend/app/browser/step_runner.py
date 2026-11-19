@@ -320,10 +320,15 @@ class PlaywrightStepRunner:
         context_vars: dict[str, Any],
         extract_schema: dict[str, Any] | None = None,
         table_settings: dict[str, Any] | None = None,
+        *,
+        security_barrier_mode: bool = False,
     ) -> dict[str, Any]:
         """
         Executes a sequence of recipe steps with continuous security checks.
         Supports standard forms, dropdowns, SPAs, and GET/POST searches.
+
+        When ``security_barrier_mode`` is True, pre/post-action security halts are
+        suppressed so Cloudflare/Turnstile/CAPTCHA recovery steps can run.
         """
         logger.info("Starting execution of %d steps for run %s node %s", len(steps), self.run_id, self.node_id)
 
@@ -366,13 +371,14 @@ class PlaywrightStepRunner:
             except Exception:
                 pass
 
-            # Continuous pre-action security inspection
-            sec_dom = await SecurityDetector.inspect_page(self.page)
-            if sec_dom.is_detected:
-                evidence = await EvidenceCollector.capture_evidence(
-                    self.page, self.run_id, self.node_id, reason=sec_dom.reason
-                )
-                raise SecurityChallengeException(sec_dom)
+            # Continuous pre-action security inspection (skipped during barrier recovery)
+            if not security_barrier_mode:
+                sec_dom = await SecurityDetector.inspect_page(self.page)
+                if sec_dom.is_detected:
+                    evidence = await EvidenceCollector.capture_evidence(
+                        self.page, self.run_id, self.node_id, reason=sec_dom.reason
+                    )
+                    raise SecurityChallengeException(sec_dom)
 
             loc = step.get("locator") or step.get("selector") or {}
             selector = self._build_playwright_selector(loc)
@@ -395,22 +401,23 @@ class PlaywrightStepRunner:
                         wait_for_mount=True,
                     )
 
-                    # Security inspection on navigation response if available
-                    if response:
-                        sec_resp = await SecurityDetector.inspect_response(response, url)
-                        if sec_resp and sec_resp.is_detected:
-                            evidence = await EvidenceCollector.capture_evidence(
-                                self.page, self.run_id, self.node_id, reason=sec_resp.reason
-                            )
-                            raise SecurityChallengeException(sec_resp)
+                    if not security_barrier_mode:
+                        # Security inspection on navigation response if available
+                        if response:
+                            sec_resp = await SecurityDetector.inspect_response(response, url)
+                            if sec_resp and sec_resp.is_detected:
+                                evidence = await EvidenceCollector.capture_evidence(
+                                    self.page, self.run_id, self.node_id, reason=sec_resp.reason
+                                )
+                                raise SecurityChallengeException(sec_resp)
 
-                    # Security inspection on DOM post-load
-                    sec_dom = await SecurityDetector.inspect_page(self.page)
-                    if sec_dom.is_detected:
-                        evidence = await EvidenceCollector.capture_evidence(
-                            self.page, self.run_id, self.node_id, reason=sec_dom.reason
-                        )
-                        raise SecurityChallengeException(sec_dom)
+                        # Security inspection on DOM post-load
+                        sec_dom = await SecurityDetector.inspect_page(self.page)
+                        if sec_dom.is_detected:
+                            evidence = await EvidenceCollector.capture_evidence(
+                                self.page, self.run_id, self.node_id, reason=sec_dom.reason
+                            )
+                            raise SecurityChallengeException(sec_dom)
 
                     # Step-by-step wait for portal stabilization
                     await self.page.wait_for_timeout(1200)
@@ -813,13 +820,14 @@ class PlaywrightStepRunner:
                     else:
                         await self.page.wait_for_timeout(1000)
 
-                    # Post-click security check
-                    sec_dom = await SecurityDetector.inspect_page(self.page)
-                    if sec_dom.is_detected:
-                        evidence = await EvidenceCollector.capture_evidence(
-                            self.page, self.run_id, self.node_id, reason=sec_dom.reason
-                        )
-                        raise SecurityChallengeException(sec_dom)
+                    if not security_barrier_mode:
+                        # Post-click security check
+                        sec_dom = await SecurityDetector.inspect_page(self.page)
+                        if sec_dom.is_detected:
+                            evidence = await EvidenceCollector.capture_evidence(
+                                self.page, self.run_id, self.node_id, reason=sec_dom.reason
+                            )
+                            raise SecurityChallengeException(sec_dom)
 
                 elif action == "click_if_visible":
                     target = await self._resolve_target_scope(selector)

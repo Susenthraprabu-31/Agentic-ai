@@ -2014,6 +2014,154 @@ You also receive a screenshot of the live portal. Use it together with the DOM s
 - **Homepage / hero combined search:** When one visible text box accepts owner, address, and parcel/PCN together with a adjacent **Search** submit (often `input[type=submit]` with an id such as `btnReal`), set `input_selector` to that box and `submit_selector` to that submit control exactly from the snapshot. Set `tab_selector` to null — do not click sidebar or quick links (Address Change, Map Search, forms). Never use browser translate widgets (`goog-gt-*`) as submit.
 """
 
+SECURITY_PROMPT_SUFFIX = """
+8. SECURITY BARRIERS (Cloudflare, Turnstile, CAPTCHA, bot checks):
+   - If the screenshot or snapshot shows "Performing security verification", Cloudflare/CLOUDFLARE branding, Turnstile widgets, "Verify you are human", CAPTCHA, or rate-limit pages, you MUST NOT return county search selectors yet.
+   - Set **security_barrier_detected** to true and **security_barrier_type** to one of: cloudflare, turnstile, captcha, rate_limit.
+   - Set tab_selector, radio_selector, input_selector, submit_selector, fills, and alternate_fills to null.
+   - Return **playwright_diagnostic_steps**: a JSON array of Playwright recipe steps to clear the barrier, then execution will re-plan the search.
+   - Use the same step shape as runtime recipes: each step has **action**, **selector** (CSS string when needed), **description**, optional **duration** / **timeout_ms**, **optional**: true for fragile clicks.
+   - Allowed actions: **screenshot**, **wait**, **wait_for_selector**, **wait_for_load_state**, **click**, **click_if_visible**, **fill**, **type**, **check**.
+   - Cloudflare / Turnstile: wait for widget, click the visible challenge control when appropriate (e.g. `.cf-turnstile`, `iframe[src*='challenges.cloudflare.com']`, `#challenge-form input[type='checkbox']`), wait for auto-redirect or for challenge iframe to disappear, then screenshot.
+   - Classic CAPTCHA: use **fill** / **type** on text inputs shown in the snapshot; **click** submit/verify buttons from the snapshot only (never invent selectors). Image/audio CAPTCHA may not be solvable — still return best-effort visible controls with `optional: true`.
+   - Example playwright_diagnostic_steps:
+     [
+       {"action": "screenshot", "description": "Security barrier before recovery"},
+       {"action": "wait", "duration": 2000, "description": "Let Turnstile script load"},
+       {"action": "wait_for_selector", "selector": ".cf-turnstile, iframe[src*='challenges.cloudflare.com']", "state": "visible", "timeout_ms": 20000, "optional": true},
+       {"action": "click_if_visible", "selector": ".cf-turnstile", "description": "Activate Turnstile widget", "optional": true},
+       {"action": "wait", "duration": 5000, "description": "Wait for Cloudflare verification"},
+       {"action": "wait_for_load_state", "state": "networkidle", "timeout_ms": 15000, "optional": true},
+       {"action": "screenshot", "description": "After security challenge interaction"}
+     ]
+   - reasoning: briefly describe which controls you saw and what the steps attempt; do not return county search selectors in the same response.
+9. When **security_barrier_detected** is true, rule 8 overrides rules 1–7: return only **playwright_diagnostic_steps** (click/fill/wait as needed) and null out all search selectors.
+"""
+
+DEFAULT_SECURITY_DIAGNOSTIC_STEPS: list[dict[str, Any]] = [
+    {
+        "action": "screenshot",
+        "description": "Security barrier before recovery",
+    },
+    {
+        "action": "wait",
+        "duration": 2000,
+        "description": "Let challenge widget load",
+    },
+    {
+        "action": "wait_for_selector",
+        "selector": ".cf-turnstile, iframe[src*='challenges.cloudflare.com'], #challenge-form",
+        "state": "visible",
+        "timeout_ms": 20000,
+        "optional": True,
+    },
+    {
+        "action": "click_if_visible",
+        "selector": ".cf-turnstile",
+        "description": "Activate Turnstile widget",
+        "optional": True,
+    },
+    {
+        "action": "wait",
+        "duration": 5000,
+        "description": "Wait for Cloudflare verification",
+    },
+    {
+        "action": "screenshot",
+        "description": "After security challenge interaction",
+    },
+]
+
+def _ai_system_prompt() -> str:
+    return SYSTEM_PROMPT_ASSESSOR + VISION_PROMPT_SUFFIX + SECURITY_PROMPT_SUFFIX
+
+
+def _sanitize_diagnostic_steps(steps: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Keep Playwright steps safe for security-barrier recovery (no navigation/extract)."""
+    allowed = frozenset(
+        {
+            "screenshot",
+            "wait",
+            "wait_for_selector",
+            "wait_for_load_state",
+            "click",
+            "click_if_visible",
+            "fill",
+            "type",
+            "check",
+            "uncheck",
+            "select",
+        }
+    )
+    out: list[dict[str, Any]] = []
+    for step in steps or []:
+        action = str(step.get("action") or "").lower().strip()
+        if action in allowed:
+            out.append(step)
+    return out or list(DEFAULT_SECURITY_DIAGNOSTIC_STEPS)
+
+
+def _security_barrier_plan(
+    *,
+    barrier_type: str,
+    reason: str,
+    diagnostic_steps: list[dict[str, Any]] | None = None,
+    query_type: str = "parcel",
+) -> dict[str, Any]:
+    steps = _sanitize_diagnostic_steps(diagnostic_steps)
+    return {
+        "query_type": query_type,
+        "security_barrier_detected": True,
+        "security_barrier_type": barrier_type,
+        "playwright_diagnostic_steps": steps,
+        "tab_selector": None,
+        "radio_selector": None,
+        "input_selector": None,
+        "submit_selector": None,
+        "fills": None,
+        "alternate_fills": None,
+        "use_enter_key": False,
+        "confidence": "high",
+        "reasoning": reason,
+    }
+
+
+async def _page_security_hint(page: Page | None) -> str | None:
+    if not page or page.is_closed():
+        return None
+    try:
+        from app.browser.security_detector import SecurityDetector
+
+        sec = await SecurityDetector.inspect_page(page)
+        if sec.is_detected:
+            return sec.reason or sec.event_type or "Security barrier detected"
+    except Exception:
+        pass
+    return None
+
+
+def _plan_indicates_security_barrier(plan: dict[str, Any]) -> bool:
+    if plan.get("security_barrier_detected"):
+        return True
+    btype = (plan.get("security_barrier_type") or "").strip().lower()
+    return btype in ("cloudflare", "turnstile", "captcha", "rate_limit", "security")
+
+
+async def _run_security_diagnostic_steps(
+    page: Page,
+    steps: list[dict[str, Any]],
+    workflow_run_id: str | None,
+    node_id: str | None,
+) -> None:
+    from app.browser.step_runner import PlaywrightStepRunner
+
+    runner = PlaywrightStepRunner(page, str(workflow_run_id or ""), str(node_id or ""))
+    await runner.execute_steps(
+        _sanitize_diagnostic_steps(steps),
+        {},
+        security_barrier_mode=True,
+    )
+
 
 SYSTEM_PROMPT_ASSESSOR = """You analyze property appraiser, assessor, and county tax collector websites and return Playwright CSS selectors to run a search.
 
@@ -2033,7 +2181,10 @@ Return ONLY valid JSON:
   "submit_selector": "selector for the in-form search/submit control that runs the filled query",
   "use_enter_key": false,
   "confidence": "high|medium|low",
-  "reasoning": "one short sentence"
+  "reasoning": "one short sentence",
+  "security_barrier_detected": false,
+  "security_barrier_type": null,
+  "playwright_diagnostic_steps": []
 }
 
 Strict Rules:
@@ -2167,18 +2318,19 @@ class PageSearchAI:
 
         b64 = base64.b64encode(png).decode("ascii")
         data_url = f"data:image/png;base64,{b64}"
-        user_text = json.dumps(
-            {
-                "query_type": qt,
-                "query_value": query_value,
-                "page": snapshot,
-            }
-        )
+        user_payload: dict[str, Any] = {
+            "query_type": qt,
+            "query_value": query_value,
+            "page": snapshot,
+        }
+        if snapshot.get("security_barrier_hint"):
+            user_payload["security_barrier_hint"] = snapshot["security_barrier_hint"]
+        user_text = json.dumps(user_payload)
         resp, provider = await chat_completions_create(
             create_kwargs={
                 "model": getattr(settings, "OPENAI_MODEL", "gpt-4.1") or "gpt-4.1",
                 "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT_ASSESSOR + VISION_PROMPT_SUFFIX},
+                    {"role": "system", "content": _ai_system_prompt()},
                     {
                         "role": "user",
                         "content": [
@@ -2193,6 +2345,14 @@ class PageSearchAI:
             }
         )
         plan = json.loads(resp.choices[0].message.content or "{}")
+        if _plan_indicates_security_barrier(plan):
+            plan["query_type"] = qt
+            plan["vision_provider"] = provider
+            plan["playwright_diagnostic_steps"] = _sanitize_diagnostic_steps(
+                plan.get("playwright_diagnostic_steps")
+            )
+            logger.warning("Vision plan: security barrier (%s)", plan.get("security_barrier_type"))
+            return plan
         if plan.get("input_selector") or plan.get("fills"):
             plan["query_type"] = qt
             plan["vision_provider"] = provider
@@ -2753,6 +2913,11 @@ class PageSearchAI:
 
         snapshot = await self.extract_snapshot(page)
         plan_seed: dict[str, Any] = {"_tax_portal_search_url": portal_url or page.url or ""}
+
+        sec_hint = await _page_security_hint(page)
+        if sec_hint:
+            snapshot["security_barrier_hint"] = sec_hint
+
         plan = await self.plan_search(
             snapshot,
             query_type,
@@ -2763,6 +2928,91 @@ class PageSearchAI:
         )
         plan.update(plan_seed)
         plan.setdefault("_tax_portal_search_url", portal_url or page.url or "")
+
+        if _plan_indicates_security_barrier(plan):
+            diag = plan.get("playwright_diagnostic_steps") or DEFAULT_SECURITY_DIAGNOSTIC_STEPS
+            barrier_type = plan.get("security_barrier_type") or "unknown"
+            await _log(
+                "security_barrier",
+                f"Security barrier ({barrier_type}); running Playwright challenge steps",
+                2,
+                status="RUNNING",
+            )
+            security_plan = dict(plan)
+            try:
+                await _run_security_diagnostic_steps(page, diag, workflow_run_id, node_id)
+            except Exception as diag_err:
+                logger.warning("Security barrier steps error: %s", diag_err)
+            await page.wait_for_timeout(1200)
+            sec_after = await _page_security_hint(page)
+            if sec_after:
+                await _log(
+                    "security_barrier",
+                    f"Security barrier still present after challenge steps: {sec_after}",
+                    2,
+                    status="FAILED",
+                )
+                return {
+                    "success": False,
+                    "plan": security_plan,
+                    "record": {
+                        "search_failed": True,
+                        "failure_reason": "security_barrier",
+                        "security_barrier_type": barrier_type,
+                        "query_value": query_value,
+                    },
+                    "playwright_diagnostic_steps": _sanitize_diagnostic_steps(diag),
+                    "detail_opened": False,
+                    "downloaded_documents": [],
+                }
+            await _log(
+                "security_barrier",
+                "Security barrier cleared; re-planning county search",
+                2,
+                status="COMPLETED",
+            )
+            try:
+                from app.browser.modal_detector import (
+                    detect_and_dismiss_modal_ai,
+                    dismiss_blocking_overlays_heuristic,
+                )
+
+                await dismiss_blocking_overlays_heuristic(page)
+                await detect_and_dismiss_modal_ai(page, workflow_run_id=workflow_run_id, node_id=node_id)
+            except Exception:
+                pass
+            snapshot = await self.extract_snapshot(page)
+            plan = await self.plan_search(
+                snapshot,
+                query_type,
+                query_value,
+                page=page,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            )
+            plan.update(plan_seed)
+            plan["security_barrier_recovery"] = security_plan
+            plan.setdefault("_tax_portal_search_url", portal_url or page.url or "")
+            if _plan_indicates_security_barrier(plan):
+                await _log(
+                    "security_barrier",
+                    "Search portal still behind a security barrier after recovery",
+                    2,
+                    status="FAILED",
+                )
+                return {
+                    "success": False,
+                    "plan": plan,
+                    "record": {
+                        "search_failed": True,
+                        "failure_reason": "security_barrier",
+                        "security_barrier_type": plan.get("security_barrier_type") or barrier_type,
+                        "query_value": query_value,
+                    },
+                    "playwright_diagnostic_steps": _sanitize_diagnostic_steps(diag),
+                    "detail_opened": False,
+                    "downloaded_documents": [],
+                }
 
         plan["_snapshot_elements"] = snapshot.get("elements", [])
         qt_plan = plan.get("query_type", query_type)
@@ -2973,6 +3223,24 @@ class PageSearchAI:
         elif qt in ("owner_name", "name"):
             qt = "owner"
 
+        if snapshot.get("security_barrier_hint") and not page:
+            return _security_barrier_plan(
+                barrier_type="cloudflare",
+                reason=str(snapshot["security_barrier_hint"]),
+                query_type=qt,
+            )
+
+        if page:
+            sec_hint = snapshot.get("security_barrier_hint") or await _page_security_hint(page)
+            if sec_hint:
+                snapshot["security_barrier_hint"] = sec_hint
+                if not llm_configured():
+                    return _security_barrier_plan(
+                        barrier_type="cloudflare",
+                        reason=sec_hint,
+                        query_type=qt,
+                    )
+
         if page and llm_configured():
             try:
                 vision_plan = await self._plan_search_with_vision(
@@ -2991,11 +3259,13 @@ class PageSearchAI:
                     "query_value": query_value,
                     "page": snapshot,
                 }
+                if snapshot.get("security_barrier_hint"):
+                    user_payload["security_barrier_hint"] = snapshot["security_barrier_hint"]
                 resp, provider = await chat_completions_create(
                     create_kwargs={
                         "model": getattr(settings, "OPENAI_MODEL", "gpt-4.1") or "gpt-4.1",
                         "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT_ASSESSOR},
+                            {"role": "system", "content": _ai_system_prompt()},
                             {"role": "user", "content": json.dumps(user_payload)},
                         ],
                         "temperature": 0.1,
@@ -3004,6 +3274,13 @@ class PageSearchAI:
                     }
                 )
                 plan = json.loads(resp.choices[0].message.content or "{}")
+                if _plan_indicates_security_barrier(plan):
+                    plan["query_type"] = qt
+                    plan["playwright_diagnostic_steps"] = _sanitize_diagnostic_steps(
+                        plan.get("playwright_diagnostic_steps")
+                    )
+                    logger.warning("LLM plan: security barrier (%s)", plan.get("security_barrier_type"))
+                    return plan
                 if plan.get("input_selector") or plan.get("fills"):
                     plan["query_type"] = qt
                     logger.info("AI LLM dynamically planned search via %s: %s", provider, plan.get("reasoning"))

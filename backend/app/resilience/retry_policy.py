@@ -110,6 +110,8 @@ BROWSER_NAVIGATION_POLICY = RetryPolicy(
         ErrorCategory.INVALID_SELECTOR,
         ErrorCategory.HTTP_AUTH_ERROR,
         ErrorCategory.HTTP_FORBIDDEN,
+        ErrorCategory.HTTP_429,
+        ErrorCategory.WORKFLOW_CANCELLED,
     },
 )
 

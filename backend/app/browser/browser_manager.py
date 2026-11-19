@@ -270,20 +270,25 @@ class BrowserManager:
                 if is_visible_mode:
                     launch_args.extend(["--start-maximized", "--window-size=1280,800"])
 
+                channel = (getattr(settings, "PLAYWRIGHT_CHANNEL", "") or "").strip() or None
                 logger.info(
-                    "Launching %s browser (headless=%s, slow_mo=%dms, mode=%s, timeout=%dms)",
+                    "Launching %s browser (channel=%s, headless=%s, slow_mo=%dms, mode=%s, timeout=%dms)",
                     browser_type_name,
+                    channel or "bundled",
                     is_headless,
                     slow_mo,
                     getattr(settings, "PLAYWRIGHT_BROWSER_MODE", "headless"),
                     settings.BROWSER_LAUNCH_TIMEOUT_MS,
                 )
-                self._browser = await browser_type.launch(
-                    headless=is_headless,
-                    slow_mo=slow_mo,
-                    args=launch_args,
-                    timeout=settings.BROWSER_LAUNCH_TIMEOUT_MS,
-                )
+                launch_kwargs: dict = {
+                    "headless": is_headless,
+                    "slow_mo": slow_mo,
+                    "args": launch_args,
+                    "timeout": settings.BROWSER_LAUNCH_TIMEOUT_MS,
+                }
+                if channel:
+                    launch_kwargs["channel"] = channel
+                self._browser = await browser_type.launch(**launch_kwargs)
 
                 self._browser.on("disconnected", lambda: self._on_browser_disconnected())
                 self._state = BrowserLifecycleState.READY

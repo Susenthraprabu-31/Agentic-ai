@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     PLAYWRIGHT_KEEP_BROWSER_OPEN_SECONDS: int = 5
     PLAYWRIGHT_BROWSER_MODE: str = "local_visible"
     PLAYWRIGHT_BROWSER: str = "chromium"
+    # Use installed browser binary: "chrome", "msedge", or "" for bundled Chromium only.
+    PLAYWRIGHT_CHANNEL: str = ""
     PLAYWRIGHT_NAVIGATION_TIMEOUT_MS: int = 60000
     PLAYWRIGHT_ACTION_TIMEOUT_MS: int = 25000
     PLAYWRIGHT_EVIDENCE_DIR: str = "storage/evidence"
