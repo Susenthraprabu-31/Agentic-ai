@@ -1,0 +1,115 @@
+name: Deploy Title Search Platform to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-ec2-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2_deploy_key
+          chmod 600 ~/.ssh/ec2_deploy_key
+
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy application
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          ssh \
+            -i ~/.ssh/ec2_deploy_key \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            "ubuntu@$EC2_HOST" 'bash -s' <<'REMOTE'
+
+          set -Eeuo pipefail
+
+          cd "$HOME/Agentic-ai"
+
+          echo "Checking EC2 Git state..."
+
+          if [ "$(git branch --show-current)" != "main" ]; then
+            echo "ERROR: EC2 is not on main."
+            exit 1
+          fi
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "ERROR: EC2 contains tracked local changes."
+            git status --short
+            exit 1
+          fi
+
+          echo "Pulling latest main..."
+          git fetch origin main
+          git pull --ff-only origin main
+
+          echo "Building application services..."
+          docker compose build \
+            backend \
+            frontend \
+            celery_worker \
+            celery_beat
+
+          echo "Recreating application services..."
+          docker compose up -d \
+            --no-deps \
+            --force-recreate \
+            backend \
+            frontend \
+            celery_worker \
+            celery_beat
+
+          echo "Checking backend health..."
+
+          healthy=0
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/api/v1/health/live >/dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$healthy" -ne 1 ]; then
+            echo "ERROR: Backend health check failed."
+            docker compose ps
+            docker compose logs --tail=100 backend
+            exit 1
+          fi
+
+          echo "Deployment successful!"
+          docker compose ps
+
+          REMOTE
+
+      - name: Deployment result
+        if: success()
+        run: echo "EC2 deployment completed successfully."
+
+      - name: Deployment failure
+        if: failure()
+        run: echo "EC2 deployment failed. Check the logs."
