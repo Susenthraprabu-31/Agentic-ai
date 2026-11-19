@@ -2678,16 +2678,53 @@ class PageSearchAI:
             try:
                 from app.browser.browser_manager import get_browser_manager
                 bm = await get_browser_manager()
+                live_url = page.url if not page.is_closed() else None
+                if live_url and not live_url.startswith("about:"):
+                    pass
+                elif portal_url:
+                    live_url = portal_url
                 await bm.log_session_activity(
                     action=action,
                     description=description,
                     node_id=node_id,
                     step_index=step_idx,
                     status=status,
-                    url=page.url if not page.is_closed() else None,
+                    url=live_url,
                 )
             except Exception:
                 pass
+
+        portal_url = (portal_url or "").strip()
+        if portal_url:
+            from app.browser.navigation import ensure_portal_page
+
+            portal_ready = await ensure_portal_page(
+                page,
+                portal_url,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+                wait_for_mount=True,
+            )
+            if not portal_ready:
+                await _log(
+                    "navigate",
+                    f"Could not open county portal: {portal_url}",
+                    0,
+                    status="FAILED",
+                )
+                return {
+                    "success": False,
+                    "plan": {},
+                    "record": {
+                        "search_failed": True,
+                        "failure_reason": "portal_navigation_failed",
+                        "portal_url": portal_url,
+                        "query_value": query_value,
+                    },
+                    "detail_opened": False,
+                    "downloaded_documents": [],
+                }
+            await _log("navigate", f"Opened county portal: {page.url}", 0)
 
         await _log("analyze_page", f"AI analyzing search portal DOM: {page.url}", 1)
 
@@ -2756,8 +2793,18 @@ class PageSearchAI:
             validation = await self.validate_plan_on_page(page, plan)
             plan["validation"] = validation
 
-        runtime_steps = build_runtime_steps_from_plan(plan, include_navigate=False, portal_url=portal_url or page.url)
+        from app.browser.navigation import page_needs_portal_navigation
+
+        portal_target = portal_url or page.url or ""
+        include_navigate = page_needs_portal_navigation(page, portal_target)
+        runtime_steps = build_runtime_steps_from_plan(
+            plan,
+            include_navigate=include_navigate,
+            portal_url=portal_target,
+        )
         plan["runtime_steps"] = runtime_steps
+        plan["portal_url"] = portal_url
+        plan.setdefault("_tax_portal_search_url", portal_url or page.url or "")
         await _log(
             "generate_steps",
             f"Generated {len(runtime_steps)} Playwright instruction(s) for {plan.get('query_type', query_type)} search",
@@ -3683,6 +3730,37 @@ class PageSearchAI:
                 await dismiss_blocking_overlays_heuristic(page)
         except Exception as prep_err:
             logger.debug("Tax portal prep: %s", prep_err)
+
+        portal_target = (
+            (plan.get("_tax_portal_search_url") or plan.get("portal_url") or "").strip()
+        )
+        if portal_target:
+            from app.browser.navigation import ensure_portal_page
+
+            if not await ensure_portal_page(
+                page,
+                portal_target,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            ):
+                await _log_act(
+                    "navigate",
+                    f"Could not open portal before search: {portal_target}",
+                    0,
+                    status="FAILED",
+                )
+                return {
+                    "success": False,
+                    "plan": plan,
+                    "record": {
+                        "search_failed": True,
+                        "failure_reason": "portal_navigation_failed",
+                        "portal_url": portal_target,
+                        "query_value": query_value,
+                    },
+                    "detail_opened": False,
+                    "downloaded_documents": [],
+                }
 
         # 0. Initial page navigation milestone
         await _log_act("navigate", f"Connected to portal: {page.url}", 0)

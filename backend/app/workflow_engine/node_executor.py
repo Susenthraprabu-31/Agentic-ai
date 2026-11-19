@@ -255,20 +255,24 @@ async def _execute_browser_search(
                 if first_step.get("action") == "navigate" and first_step.get("url"):
                     recipe_nav_url = first_step.get("url")
 
-            from app.browser.navigation import navigate_portal_step_by_step
+            from app.browser.navigation import ensure_portal_page
 
             target_url = recipe_nav_url or (resolved.search_page_url if resolved else None) or (resolved.website_url if resolved else None) or portal_url
             curr_url = page.url or ""
-            # Only navigate here if page is uninitialized or not already loaded at the target portal
-            if not curr_url or curr_url.startswith("about:"):
-                if target_url:
-                    logger.info("Navigating to portal for node %s: %s", node_id, target_url)
-                    await navigate_portal_step_by_step(
-                        page=page,
-                        url=target_url,
-                        workflow_run_id=str(context.run_id),
-                        node_id=str(node_id),
-                        wait_for_mount=True,
+            if target_url and (not curr_url or curr_url.startswith("about:")):
+                logger.info("Navigating to portal for node %s: %s", node_id, target_url)
+                loaded = await ensure_portal_page(
+                    page,
+                    target_url,
+                    workflow_run_id=str(context.run_id),
+                    node_id=str(node_id),
+                    wait_for_mount=True,
+                )
+                if not loaded:
+                    logger.error(
+                        "Initial portal navigation failed for node %s (still on %s)",
+                        node_id,
+                        page.url,
                     )
 
             modal_res: dict[str, Any] = {}
@@ -383,13 +387,21 @@ async def _execute_browser_search(
                     )
                 )
                 if need_portal_nav and portal_url:
-                    await navigate_portal_step_by_step(
-                        page=page,
-                        url=portal_url,
+                    from app.browser.navigation import ensure_portal_page
+
+                    loaded = await ensure_portal_page(
+                        page,
+                        portal_url,
                         workflow_run_id=str(context.run_id),
                         node_id=str(node_id),
                         wait_for_mount=True,
                     )
+                    if not loaded:
+                        logger.error(
+                            "AI recovery portal navigation failed (page URL=%s, target=%s)",
+                            page.url,
+                            portal_url,
+                        )
 
                 try:
                     from app.extraction.tax_collector_reports import (
