@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     PLAYWRIGHT_ACTION_TIMEOUT_MS: int = 25000
     PLAYWRIGHT_EVIDENCE_DIR: str = "storage/evidence"
     PLAYWRIGHT_ALLOW_LOCAL_URLS: bool = True
+    BROWSER_LIVE_VIEW_ENABLED: bool = True
+    # When true, Chromium runs headless and the Live Chromium Browser tab shows the viewport (no OS popup).
+    BROWSER_LIVE_VIEW_FORCE_HEADLESS: bool = True
+    BROWSER_LIVE_VIEW_INTERVAL_SEC: float = 1.25
+    BROWSER_LIVE_FRAME_TTL_SECONDS: int = 3600
+    BROWSER_LIVE_VIEW_JPEG_QUALITY: int = 72
 
     # -------------------------------------------------------------------------
     # Document & PDF Retrieval (Phase 3C)

@@ -101,6 +101,8 @@ class BrowserManager:
         self._failure_count: int = 0
         self._last_failure_reason: str | None = None
         self._session_service = BrowserSessionService()
+        self._current_workflow_run_id: uuid.UUID | None = None
+        self._live_capture_page: Page | None = None
 
     def _get_lock(self) -> asyncio.Lock:
         current_loop = asyncio.get_running_loop()
@@ -233,10 +235,18 @@ class BrowserManager:
                 logger.info("Initializing Playwright runtime (Session: %s)...", self._current_session_id)
                 self._playwright = await async_playwright().start()
 
-                is_visible_mode = (
+                live_view = getattr(settings, "BROWSER_LIVE_VIEW_ENABLED", True)
+                force_headless = getattr(settings, "BROWSER_LIVE_VIEW_FORCE_HEADLESS", True)
+                wants_visible = (
                     getattr(settings, "PLAYWRIGHT_BROWSER_MODE", "headless") == "local_visible"
                     or not getattr(settings, "PLAYWRIGHT_HEADLESS", True)
                 )
+                is_visible_mode = wants_visible and not (live_view and force_headless)
+
+                if live_view and force_headless and wants_visible:
+                    logger.info(
+                        "Live Chromium UI enabled — running Playwright headless (no separate desktop browser window)."
+                    )
 
                 if is_visible_mode:
                     display_ok, diagnostic = check_display_available()
@@ -448,6 +458,13 @@ class BrowserManager:
 
             page = await context.new_page()
             self._total_pages_created += 1
+            self._current_workflow_run_id = effective_wf_id
+            self._live_capture_page = page
+
+            if effective_wf_id:
+                from app.services.browser_live_view import start_live_capture
+
+                start_live_capture(page, str(effective_wf_id))
 
             # Always register or refresh session record for this specific execution context
             session_id = f"sess_{uuid.uuid4().hex[:12]}"
@@ -479,6 +496,13 @@ class BrowserManager:
             raise
 
         finally:
+            if effective_wf_id:
+                from app.services.browser_live_view import stop_live_capture
+
+                await stop_live_capture(str(effective_wf_id), page)
+            self._live_capture_page = None
+            self._current_workflow_run_id = None
+
             # If visible mode is active, optionally keep browser visible briefly before cleanup
             is_visible_mode = (
                 getattr(settings, "PLAYWRIGHT_BROWSER_MODE", "headless") == "local_visible"
@@ -559,6 +583,19 @@ class BrowserManager:
                 error=error,
                 duration_ms=duration_ms,
             )
+        if (
+            self._live_capture_page
+            and self._current_workflow_run_id
+            and getattr(settings, "BROWSER_LIVE_VIEW_ENABLED", True)
+        ):
+            from app.services.browser_live_view import capture_frame_from_page
+
+            try:
+                asyncio.create_task(
+                    capture_frame_from_page(self._live_capture_page, str(self._current_workflow_run_id))
+                )
+            except Exception:
+                pass
 
     async def close(self) -> None:
         """Cleanly closes browser and Playwright runtime, marking session closed."""

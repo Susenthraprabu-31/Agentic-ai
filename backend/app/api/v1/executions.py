@@ -5,7 +5,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user
@@ -271,6 +271,41 @@ async def get_execution_browser_activity(
         "is_healthy": latest_session.is_healthy if latest_session else True,
         "activities": activity_events,
     }
+
+
+@router.get(
+    "/{run_id}/browser-live-view",
+    summary="Get latest live Chromium viewport frame for workflow execution",
+    responses={
+        200: {"content": {"image/jpeg": {}}},
+        404: {"description": "No live frame available for this run"},
+    },
+)
+async def get_execution_browser_live_view(
+    run_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> Response:
+    """Return the most recent Playwright Chromium viewport JPEG captured during this run."""
+    service = ExecutionService(db)
+    await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
+
+    from app.services.browser_live_view import get_latest_frame
+
+    frame, meta = await get_latest_frame(str(run_id))
+    if not frame:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No live Chromium browser frame is available for this execution yet.",
+        )
+
+    headers: dict[str, str] = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+    if meta.get("url"):
+        headers["X-Frame-Url"] = str(meta["url"])[:2048]
+    if meta.get("captured_at"):
+        headers["X-Frame-Captured-At"] = str(meta["captured_at"])
+
+    return Response(content=frame, media_type="image/jpeg", headers=headers)
 
 
 @router.get(

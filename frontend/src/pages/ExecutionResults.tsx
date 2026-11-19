@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   Activity,
@@ -31,6 +31,7 @@ import {
   Layers,
   Loader2,
   MinusCircle,
+  Monitor,
   MonitorPlay,
   Printer,
   Receipt,
@@ -723,8 +724,20 @@ export default function ExecutionResults() {
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<
-    "normalized" | "assessor" | "tax" | "documents" | "activity" | "json"
+    | "normalized"
+    | "assessor"
+    | "tax"
+    | "documents"
+    | "activity"
+    | "live-chromium"
+    | "json"
   >("assessor");
+  const [liveFrameSrc, setLiveFrameSrc] = useState<string | null>(null);
+  const [liveFrameUrl, setLiveFrameUrl] = useState<string | null>(null);
+  const [liveFrameCapturedAt, setLiveFrameCapturedAt] = useState<string | null>(null);
+  const [liveFrameError, setLiveFrameError] = useState<string | null>(null);
+  const [liveFrameLoading, setLiveFrameLoading] = useState(false);
+  const liveFrameObjectUrlRef = useRef<string | null>(null);
   const [selectedAssessorIndex, setSelectedAssessorIndex] = useState(0);
 
   // Document Viewer & Mistral OCR Modal State
@@ -772,6 +785,66 @@ export default function ExecutionResults() {
   useEffect(() => {
     fetchExecutionData();
   }, [runId]);
+
+  const refreshLiveChromiumFrame = useCallback(async () => {
+    if (!runId) return;
+    const terminalStates = ["COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"];
+    const runIsTerminal = run
+      ? terminalStates.includes(run.status.toUpperCase())
+      : true;
+    try {
+      setLiveFrameLoading(true);
+      const { blob, frameUrl, capturedAt } = await executionsApi.fetchBrowserLiveViewBlob(runId);
+      const objectUrl = URL.createObjectURL(blob);
+      if (liveFrameObjectUrlRef.current) {
+        URL.revokeObjectURL(liveFrameObjectUrlRef.current);
+      }
+      liveFrameObjectUrlRef.current = objectUrl;
+      setLiveFrameSrc(objectUrl);
+      setLiveFrameUrl(frameUrl || null);
+      setLiveFrameCapturedAt(capturedAt || null);
+      setLiveFrameError(null);
+    } catch (err: unknown) {
+      const ax = err as { response?: { status?: number } };
+      if (ax.response?.status === 404) {
+        if (!liveFrameObjectUrlRef.current) {
+          setLiveFrameError(
+            runIsTerminal
+              ? "No Chromium viewport was captured for this run."
+              : "Waiting for the live Chromium session to publish frames…"
+          );
+        }
+      } else {
+        setLiveFrameError("Unable to load the live Chromium browser view.");
+      }
+    } finally {
+      setLiveFrameLoading(false);
+    }
+  }, [runId, run?.status]);
+
+  useEffect(() => {
+    if (activeTab !== "live-chromium" || !runId) {
+      return;
+    }
+    const terminalStates = ["COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"];
+    const runIsTerminal = run
+      ? terminalStates.includes(run.status.toUpperCase())
+      : true;
+    refreshLiveChromiumFrame();
+    const pollMs = runIsTerminal ? 8000 : 1400;
+    const interval = setInterval(() => {
+      refreshLiveChromiumFrame();
+    }, pollMs);
+    return () => clearInterval(interval);
+  }, [activeTab, runId, run?.status, refreshLiveChromiumFrame]);
+
+  useEffect(() => {
+    return () => {
+      if (liveFrameObjectUrlRef.current) {
+        URL.revokeObjectURL(liveFrameObjectUrlRef.current);
+      }
+    };
+  }, []);
 
   // Controlled polling until execution reaches terminal state
   useEffect(() => {
@@ -1239,6 +1312,21 @@ export default function ExecutionResults() {
           </button>
 
           <button
+            onClick={() => setActiveTab("live-chromium")}
+            className={`pb-2.5 text-xs font-medium border-b-2 flex items-center gap-1.5 transition-colors ${
+              activeTab === "live-chromium"
+                ? "border-blue-600 text-blue-600 font-semibold"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            <Monitor className="w-3.5 h-3.5" />
+            Live Chromium Browser
+            {!isTerminal && (
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            )}
+          </button>
+
+          <button
             onClick={() => setActiveTab("documents")}
             className={`pb-2.5 text-xs font-medium border-b-2 flex items-center gap-1.5 transition-colors ${
               activeTab === "documents"
@@ -1572,6 +1660,93 @@ export default function ExecutionResults() {
                   </p>
                 </div>
               )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Tab: Live Chromium Browser (viewport stream) */}
+        {activeTab === "live-chromium" && (
+          <Card>
+            <CardContent className="p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-50 border rounded-lg">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Monitor className="w-4 h-4 text-blue-600" />
+                    <span className="font-semibold text-xs text-slate-900">
+                      Playwright Chromium — in-app live viewport
+                    </span>
+                    <span className="text-[10px] text-muted-foreground hidden sm:inline">
+                      (no separate desktop browser window)
+                    </span>
+                    {browserActivity?.browser_state && (
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] font-semibold ${
+                          browserActivity.browser_state === "BUSY"
+                            ? "bg-blue-50 text-blue-700 border-blue-200"
+                            : browserActivity.browser_state === "READY"
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : "bg-slate-100 text-slate-700"
+                        }`}
+                      >
+                        {browserActivity.browser_state}
+                      </Badge>
+                    )}
+                  </div>
+                  {(liveFrameUrl || browserActivity?.current_url) && (
+                    <div className="flex items-center gap-1.5 text-xs text-slate-600 font-mono">
+                      <Globe className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span className="truncate max-w-md" title={liveFrameUrl || browserActivity?.current_url || ""}>
+                        {liveFrameUrl || browserActivity?.current_url}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {liveFrameCapturedAt && (
+                    <span className="text-[10px] text-muted-foreground font-mono">
+                      Frame {new Date(liveFrameCapturedAt).toLocaleTimeString()}
+                    </span>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs gap-1.5"
+                    disabled={liveFrameLoading}
+                    onClick={() => refreshLiveChromiumFrame()}
+                  >
+                    {liveFrameLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    Refresh
+                  </Button>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-900 overflow-hidden shadow-inner min-h-[420px] flex items-center justify-center">
+                {liveFrameSrc ? (
+                  <img
+                    src={liveFrameSrc}
+                    alt="Live Chromium browser viewport"
+                    className="w-full h-auto max-h-[70vh] object-contain bg-white"
+                  />
+                ) : (
+                  <div className="text-center py-16 px-6 text-slate-400 space-y-2">
+                    {liveFrameLoading ? (
+                      <Loader2 className="w-10 h-10 mx-auto animate-spin text-slate-500" />
+                    ) : (
+                      <Monitor className="w-10 h-10 mx-auto text-slate-600" />
+                    )}
+                    <p className="text-xs text-slate-400 max-w-md mx-auto">
+                      {liveFrameError ||
+                        "The live Chromium window will appear here while Playwright automation runs."}
+                    </p>
+                  </div>
+                )}
+              </div>
             </CardContent>
           </Card>
         )}

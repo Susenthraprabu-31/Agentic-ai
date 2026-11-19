@@ -114,5 +114,24 @@ export const executionsApi = {
     const res = await apiClient.get<BrowserActivityResponse>(`/executions/${runId}/browser-activity`);
     return res.data;
   },
+
+  /** Fetch latest live Chromium viewport frame (JPEG blob from Playwright) */
+  async fetchBrowserLiveViewBlob(runId: string): Promise<{
+    blob: Blob;
+    frameUrl?: string;
+    capturedAt?: string;
+  }> {
+    const res = await apiClient.get(`/executions/${runId}/browser-live-view`, {
+      responseType: "blob",
+      timeout: 20_000,
+      headers: { Accept: "image/jpeg" },
+    });
+    const headers = res.headers as Record<string, string | undefined>;
+    return {
+      blob: res.data as Blob,
+      frameUrl: headers["x-frame-url"],
+      capturedAt: headers["x-frame-captured-at"],
+    };
+  },
 };
 

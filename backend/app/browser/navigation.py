@@ -13,6 +13,62 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def page_needs_portal_navigation(page: Page, portal_url: str) -> bool:
+    """True when the Playwright page is blank or not on the target portal host."""
+    portal_url = (portal_url or "").strip()
+    if not portal_url:
+        return False
+    curr = page.url or ""
+    if not curr or curr.startswith("about:") or curr == "chrome-error://chromewebdata/":
+        return True
+    target_parsed = urlparse(portal_url)
+    curr_parsed = urlparse(curr)
+    target_host = (target_parsed.netloc or "").lower()
+    curr_host = (curr_parsed.netloc or "").lower()
+    if not target_host:
+        return False
+    return curr_host != target_host
+
+
+async def ensure_portal_page(
+    page: Page,
+    portal_url: str,
+    *,
+    timeout_ms: int | None = None,
+    workflow_run_id: str | None = None,
+    node_id: str | None = None,
+    wait_for_mount: bool = True,
+) -> bool:
+    """
+    Navigate to the county portal when the page is still about:blank or on the wrong host.
+    Returns True when the main frame left about:blank and matches the portal host (or has content).
+    """
+    portal_url = (portal_url or "").strip()
+    if not portal_url:
+        return False
+    if not page_needs_portal_navigation(page, portal_url):
+        return not (page.url or "").startswith("about:")
+
+    try:
+        await navigate_portal_step_by_step(
+            page=page,
+            url=portal_url,
+            timeout_ms=timeout_ms,
+            workflow_run_id=workflow_run_id,
+            node_id=node_id,
+            wait_for_mount=wait_for_mount,
+        )
+    except Exception as exc:
+        logger.warning("ensure_portal_page failed for %s: %s", portal_url, exc)
+        return False
+
+    curr = page.url or ""
+    if curr.startswith("about:"):
+        logger.error("Portal navigation completed but page URL is still %s (target=%s)", curr, portal_url)
+        return False
+    return True
+
+
 async def navigate_portal_step_by_step(
     page: Page,
     url: str,
