@@ -392,7 +392,7 @@ async def test_api_workflow_execute_and_query_endpoints(
     # 5. Cancel Execution
     cancel_resp = await async_client.post(f"/api/v1/executions/{run_id}/cancel", headers=headers)
     assert cancel_resp.status_code == 200
-    assert cancel_resp.json()["status"] == "CANCEL_REQUESTED"
+    assert cancel_resp.json()["status"] == "CANCELLED"
 
     # 6. Security Authorization Check: Other user cannot access run
     sec_get = await async_client.get(f"/api/v1/executions/{run_id}", headers=other_headers)

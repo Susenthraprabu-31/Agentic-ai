@@ -247,7 +247,9 @@ async def get_execution_browser_activity(
 ) -> dict:
     """Retrieve aggregated live browser session activity events, active URL, and step status."""
     service = ExecutionService(db)
-    await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
+    run_row = await service.get_execution(
+        run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser
+    )
 
     from app.services.browser_session_service import BrowserSessionService
     sess_service = BrowserSessionService(db)
@@ -260,10 +262,14 @@ async def get_execution_browser_activity(
         for s in reversed(sessions):
             activity_events.extend(s.activity_log or [])
 
+    browser_state = latest_session.state if latest_session else "IDLE"
+    if run_row.status.upper() in ("CANCELLED", "CANCEL_REQUESTED"):
+        browser_state = "CLOSED"
+
     return {
         "workflow_run_id": str(run_id),
         "session_id": latest_session.session_id if latest_session else None,
-        "browser_state": latest_session.state if latest_session else "IDLE",
+        "browser_state": browser_state,
         "current_url": latest_session.current_url if latest_session else None,
         "current_node": latest_session.current_node if latest_session else None,
         "current_step": latest_session.current_step if latest_session else None,

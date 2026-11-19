@@ -412,18 +412,29 @@ class ExecutionService:
                 detail=f"Cannot cancel execution in terminal state '{run.status}'.",
             )
 
-        # Set status to CANCEL_REQUESTED
-        run.status = RunStatus.CANCEL_REQUESTED.value
+        from app.services.execution_cancel import (
+            finalize_run_cancelled,
+            load_run_for_cancel,
+            revoke_celery_task,
+            signal_cancel,
+        )
+
+        run = await load_run_for_cancel(self.db, run_id)
+        if not run:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"WorkflowRun {run_id} not found.",
+            )
+
+        from app.services.browser_live_view import clear_live_frames
+        from app.services.execution_cancel import close_browser_sessions_for_run
+
+        await signal_cancel(run.id)
+        await revoke_celery_task(run.celery_task_id, terminate=False)
+        await finalize_run_cancelled(self.db, run, reason="Cancelled by user")
+        await close_browser_sessions_for_run(self.db, run.id)
         await self.db.commit()
-
-        # If Celery task is active, revoke it
-        if run.celery_task_id:
-            try:
-                from app.tasks.celery_app import celery_app
-
-                celery_app.control.revoke(run.celery_task_id, terminate=False)
-            except Exception as e:
-                logger.warning("Could not revoke Celery task %s: %s", run.celery_task_id, e)
+        await clear_live_frames(str(run.id))
 
         return await self.get_execution(run.id, user_id, is_superuser)
 

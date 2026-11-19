@@ -69,6 +69,37 @@ class ExecutionContext:
 
         self._analyze_definition()
 
+    async def refresh_cancellation(self) -> bool:
+        """Poll Redis/DB so in-flight runs stop soon after the user cancels."""
+        if self.is_cancelled:
+            return True
+        try:
+            from app.services.execution_cancel import is_cancel_signalled
+
+            if await is_cancel_signalled(self.run_id):
+                self.is_cancelled = True
+                return True
+        except Exception:
+            pass
+        if self.db_session is not None:
+            try:
+                from sqlalchemy import select
+
+                from app.models.execution import RunStatus, WorkflowRun
+
+                res = await self.db_session.execute(
+                    select(WorkflowRun.status).where(WorkflowRun.id == self.run_id)
+                )
+                status = res.scalar()
+                if status in (
+                    RunStatus.CANCELLED.value,
+                    RunStatus.CANCEL_REQUESTED.value,
+                ):
+                    self.is_cancelled = True
+            except Exception:
+                pass
+        return self.is_cancelled
+
     def _analyze_definition(self) -> None:
         nodes = self.definition.get("nodes", [])
         for n in nodes:
