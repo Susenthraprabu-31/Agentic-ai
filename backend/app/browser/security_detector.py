@@ -36,6 +36,14 @@ class SecurityDetector:
         "ddos protection by cloudflare",
     ]
 
+    CLOUDFLARE_BODY_PHRASES = [
+        "performing security verification",
+        "verifies you are not a bot",
+        "security service to protect against malicious bots",
+        "cf-challenge",
+        "checking your browser",
+    ]
+
     CLOUDFLARE_SELECTORS = [
         "#challenge-running",
         "#cf-challenge-running",
@@ -126,6 +134,25 @@ class SecurityDetector:
                     title=title,
                     reason=f"Cloudflare verification title detected: '{title}'",
                     details={"matched_title": cf_title},
+                )
+
+        try:
+            body_text = (await page.locator("body").inner_text(timeout=3000) or "").lower()
+        except Exception:
+            body_text = ""
+        for phrase in cls.CLOUDFLARE_BODY_PHRASES:
+            if phrase in body_text:
+                logger.warning("Cloudflare challenge body text on %s: %s", url, phrase)
+                return SecurityDetectionResult(
+                    is_detected=True,
+                    event_type=SecurityEventType.cloudflare.value,
+                    url=url,
+                    title=title,
+                    reason=(
+                        "Cloudflare bot verification is blocking automation. "
+                        "Run the Playwright worker on a trusted network or complete verification manually."
+                    ),
+                    details={"matched_phrase": phrase},
                 )
 
         # 2. Check Cloudflare DOM elements
