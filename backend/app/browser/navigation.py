@@ -158,6 +158,13 @@ async def navigate_portal_step_by_step(
     if not url:
         return None
 
+    try:
+        from app.browser.miami_dade_tax_auth import ensure_miami_dade_tax_auth_for_navigation
+
+        await ensure_miami_dade_tax_auth_for_navigation(page, url)
+    except Exception as auth_err:
+        logger.debug("Miami-Dade tax auth apply note: %s", auth_err)
+
     eff_timeout = int(timeout_ms or getattr(settings, "BROWSER_NAVIGATION_TIMEOUT_MS", 60000))
     target_parsed = urlparse(url)
     curr_url = page.url or ""
