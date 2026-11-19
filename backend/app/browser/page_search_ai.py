@@ -2301,9 +2301,28 @@ class PageSearchAI:
         if not png or len(png) < 500:
             return None
 
+        portal_hint = (snapshot.get("url") or "").strip()
+        if portal_hint and (page.url or "").startswith("about:"):
+            from app.browser.navigation import ensure_portal_page
+
+            await ensure_portal_page(
+                page,
+                portal_hint,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+                wait_for_mount=False,
+            )
+            try:
+                png = await page.screenshot(full_page=True, type="png", timeout=15000)
+            except Exception as shot_err:
+                logger.warning("Search vision screenshot retry failed: %s", shot_err)
+                return None
+
         if workflow_run_id:
             try:
                 from app.browser.browser_manager import get_browser_manager
+                from app.browser.navigation import best_page_url
+
                 bm = await get_browser_manager()
                 await bm.log_session_activity(
                     action="vision_analyze",
@@ -2311,7 +2330,7 @@ class PageSearchAI:
                     node_id=node_id,
                     step_index=2,
                     status="COMPLETED",
-                    url=page.url,
+                    url=best_page_url(page, portal_hint),
                 )
             except Exception:
                 pass
@@ -2389,8 +2408,10 @@ class PageSearchAI:
             except Exception:
                 continue
 
+        from app.browser.navigation import best_page_url
+
         return {
-            "url": page.url,
+            "url": best_page_url(page),
             "title": await page.title() if not page.is_closed() else "",
             "elements": elements,
         }
@@ -2837,12 +2858,14 @@ class PageSearchAI:
                 return
             try:
                 from app.browser.browser_manager import get_browser_manager
+                from app.browser.navigation import best_page_url
+
                 bm = await get_browser_manager()
-                live_url = page.url if not page.is_closed() else None
-                if live_url and not live_url.startswith("about:"):
-                    pass
-                elif portal_url:
-                    live_url = portal_url
+                live_url = (
+                    best_page_url(page, portal_url)
+                    if page and not page.is_closed()
+                    else portal_url or None
+                )
                 await bm.log_session_activity(
                     action=action,
                     description=description,
@@ -2899,6 +2922,16 @@ class PageSearchAI:
 
             await dismiss_blocking_overlays_heuristic(page)
             await detect_and_dismiss_modal_ai(page, workflow_run_id=workflow_run_id, node_id=node_id)
+            if portal_url:
+                from app.browser.navigation import ensure_portal_page
+
+                await ensure_portal_page(
+                    page,
+                    portal_url,
+                    workflow_run_id=workflow_run_id,
+                    node_id=node_id,
+                    wait_for_mount=False,
+                )
             if is_tax_collector_portal(page.url) or any(
                 is_tax_collector_portal(f.url or "") for f in page.frames
             ):
@@ -3975,16 +4008,25 @@ class PageSearchAI:
         except Exception:
             pass
 
+        portal_for_log = (plan.get("_tax_portal_search_url") or plan.get("portal_url") or "").strip()
+
         async def _log_act(action: str, description: str, step_idx: int, status: str = "COMPLETED", err: str | None = None):
             if bm and workflow_run_id:
                 try:
+                    from app.browser.navigation import best_page_url
+
+                    live = (
+                        best_page_url(page, portal_for_log)
+                        if page and not page.is_closed()
+                        else portal_for_log or None
+                    )
                     await bm.log_session_activity(
                         action=action,
                         description=description,
                         node_id=node_id,
                         step_index=step_idx,
                         status=status,
-                        url=page.url if (page and not page.is_closed()) else None,
+                        url=live,
                         error=err,
                     )
                 except Exception as log_err:
@@ -4164,6 +4206,33 @@ class PageSearchAI:
                 )
         except Exception as modal_err:
             logger.warning("Dynamic modal dismissal error: %s", modal_err)
+
+        if portal_target:
+            from app.browser.navigation import page_needs_portal_navigation
+
+            if page_needs_portal_navigation(page, portal_target):
+                from app.browser.navigation import ensure_portal_page
+
+                restored = await ensure_portal_page(
+                    page,
+                    portal_target,
+                    workflow_run_id=workflow_run_id,
+                    node_id=node_id,
+                    wait_for_mount=False,
+                )
+                if restored:
+                    await _log_act(
+                        "navigate",
+                        f"Restored county portal after modal/navigation drift: {page.url}",
+                        2,
+                    )
+                else:
+                    await _log_act(
+                        "navigate",
+                        f"Portal lost (page on {page.url or 'blank'}) — could not restore {portal_target}",
+                        2,
+                        status="WARNING",
+                    )
 
         # Check if the target input field is already visible and interactable
         input_already_visible = skip_fill_and_submit

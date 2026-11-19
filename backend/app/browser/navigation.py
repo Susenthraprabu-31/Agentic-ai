@@ -13,13 +13,69 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _url_is_blank_or_error(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return not u or u.startswith("about:") or u == "chrome-error://chromewebdata/"
+
+
+def best_page_url(page: Page, preferred: str = "") -> str:
+    """
+    URL for logging and snapshots: prefer a real main-frame URL, else a child frame
+    on the portal host, else the configured portal URL.
+    """
+    curr = (page.url or "").strip()
+    if not _url_is_blank_or_error(curr):
+        return curr
+    target_host = (urlparse(preferred).netloc or "").lower() if preferred else ""
+    best_frame = ""
+    for frame in page.frames:
+        fu = (frame.url or "").strip()
+        if _url_is_blank_or_error(fu):
+            continue
+        if target_host and target_host in fu.lower():
+            return fu
+        try:
+            from app.extraction.tax_collector_reports import is_tax_collector_portal
+
+            if is_tax_collector_portal(fu):
+                best_frame = best_frame or fu
+        except Exception:
+            best_frame = best_frame or fu
+    if best_frame:
+        return best_frame
+    if preferred and not _url_is_blank_or_error(preferred):
+        return preferred.strip()
+    return curr
+
+
+async def portal_content_in_child_frame(page: Page, portal_url: str) -> bool:
+    """True when the main frame is blank but a child frame hosts the target portal."""
+    if not _url_is_blank_or_error(page.url or ""):
+        return False
+    host = (urlparse(portal_url).netloc or "").lower()
+    if not host:
+        return False
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        fu = (frame.url or "").lower()
+        if host not in fu:
+            continue
+        try:
+            if await frame.locator("input, button, [role='button']").count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def page_needs_portal_navigation(page: Page, portal_url: str) -> bool:
     """True when the Playwright page is blank or not on the target portal host."""
     portal_url = (portal_url or "").strip()
     if not portal_url:
         return False
     curr = page.url or ""
-    if not curr or curr.startswith("about:") or curr == "chrome-error://chromewebdata/":
+    if _url_is_blank_or_error(curr):
         return True
     target_parsed = urlparse(portal_url)
     curr_parsed = urlparse(curr)
@@ -47,7 +103,7 @@ async def ensure_portal_page(
     if not portal_url:
         return False
     if not page_needs_portal_navigation(page, portal_url):
-        return not (page.url or "").startswith("about:")
+        return not _url_is_blank_or_error(page.url or "")
 
     try:
         await navigate_portal_step_by_step(
@@ -63,9 +119,21 @@ async def ensure_portal_page(
         return False
 
     curr = page.url or ""
-    if curr.startswith("about:"):
-        logger.error("Portal navigation completed but page URL is still %s (target=%s)", curr, portal_url)
-        return False
+    if _url_is_blank_or_error(curr):
+        if await portal_content_in_child_frame(page, portal_url):
+            logger.warning(
+                "Main frame still %s after navigation; portal inputs found in child frame — forcing main-frame goto",
+                curr,
+            )
+            try:
+                await page.goto(portal_url, wait_until="domcontentloaded", timeout=int(timeout_ms or settings.BROWSER_NAVIGATION_TIMEOUT_MS))
+                await page.wait_for_timeout(1200)
+            except Exception as exc:
+                logger.warning("Second main-frame goto for embedded portal failed: %s", exc)
+            curr = page.url or ""
+        if _url_is_blank_or_error(curr):
+            logger.error("Portal navigation completed but page URL is still %s (target=%s)", curr, portal_url)
+            return False
     return True
 
 
@@ -100,7 +168,7 @@ async def navigate_portal_step_by_step(
         curr_parsed.netloc
         and target_parsed.netloc
         and curr_parsed.netloc.lower() == target_parsed.netloc.lower()
-        and not curr_url.startswith("about:")
+        and not _url_is_blank_or_error(curr_url)
     )
 
     if is_same_host:
