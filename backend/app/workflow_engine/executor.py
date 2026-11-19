@@ -74,11 +74,26 @@ class WorkflowExecutor:
         run.last_heartbeat_at = datetime.now(timezone.utc)
 
         # 2. Check cancellation or guarded state transition to RUNNING
-        if run.status == "CANCEL_REQUESTED":
+        if run.status in ("CANCEL_REQUESTED", "CANCELLED"):
+            if run.status != "CANCELLED":
+                run.status = "CANCELLED"
+                run.completed_at = datetime.now(timezone.utc)
+                for nr in run.node_runs:
+                    if (nr.status or "").upper() not in ("COMPLETED", "FAILED", "SKIPPED", "CANCELLED"):
+                        nr.status = "CANCELLED"
+                await self.db.commit()
+            await self.db.refresh(run)
+            return run
+
+        from app.services.execution_cancel import is_cancel_signalled
+
+        if await is_cancel_signalled(run.id):
             run.status = "CANCELLED"
             run.completed_at = datetime.now(timezone.utc)
+            run.error_message = run.error_message or "Cancelled by user"
             for nr in run.node_runs:
-                nr.status = "CANCELLED"
+                if (nr.status or "").upper() not in ("COMPLETED", "FAILED", "SKIPPED", "CANCELLED"):
+                    nr.status = "CANCELLED"
             await self.db.commit()
             await self.db.refresh(run)
             return run
@@ -153,12 +168,7 @@ class WorkflowExecutor:
                 elif nr.node_type == "tax":
                     context.tax_success = True
 
-        # Check if cancellation was requested before start
-        check_cancel_q = select(WorkflowRun.status).where(WorkflowRun.id == run.id)
-        current_status_res = await self.db.execute(check_cancel_q)
-        current_status = current_status_res.scalar()
-        if current_status == "CANCEL_REQUESTED":
-            context.is_cancelled = True
+        await context.refresh_cancellation()
 
         scheduler = WorkflowScheduler(context)
         exec_outcome = await scheduler.run()
@@ -265,15 +275,23 @@ class WorkflowExecutor:
         total_duration = int((time.time() - start_wall_time) * 1000)
         final_status = exec_outcome["overall_status"]
 
-        # Check fencing token again before committing final status
-        check_fence_q = select(WorkflowRun.fencing_token).where(WorkflowRun.id == run.id)
-        current_fence_res = await self.db.execute(check_fence_q)
-        current_fence_latest = current_fence_res.scalar() or 0
-        if expected_fencing_token is not None and current_fence_latest > expected_fencing_token:
+        await context.refresh_cancellation()
+        if context.is_cancelled:
+            exec_outcome["overall_status"] = "CANCELLED"
+
+        check_run_q = select(WorkflowRun.fencing_token, WorkflowRun.status).where(WorkflowRun.id == run.id)
+        current_run_res = await self.db.execute(check_run_q)
+        fence_row = current_run_res.one_or_none()
+        db_fence = (fence_row[0] if fence_row else 0) or 0
+        db_status = fence_row[1] if fence_row else None
+        if db_status == "CANCELLED":
+            await self.db.refresh(run)
+            return run
+        if expected_fencing_token is not None and db_fence > expected_fencing_token:
             logger.warning(
                 "Finalization aborted for run %s: DB fencing_token %d > worker token %d. Worker was fenced out.",
                 run.id,
-                current_fence_latest,
+                db_fence,
                 expected_fencing_token,
             )
             return run

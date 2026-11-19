@@ -42,6 +42,8 @@ class WorkflowScheduler:
                 retry_count=self.context.node_retry_counts.get(node_id, 0),
             )
 
+        await self.context.refresh_cancellation()
+
         # 1. Cancellation check
         if self.context.is_cancelled:
             result = NodeExecutionResult(
@@ -87,6 +89,7 @@ class WorkflowScheduler:
         logger.info("Executing workflow run %s across %d waves", self.context.run_id, len(waves))
 
         for wave_idx, wave in enumerate(waves):
+            await self.context.refresh_cancellation()
             if self.context.is_cancelled:
                 # Cancel remaining nodes in subsequent waves
                 for node in wave:

@@ -113,11 +113,15 @@ async def capture_frame_from_page(page: Page, run_id: str) -> bool:
 
 
 async def _capture_loop(page: Page, run_id: str, interval: float) -> None:
+    from app.services.execution_cancel import is_cancel_signalled
+
+    if await is_cancel_signalled(run_id):
+        return
     await capture_frame_from_page(page, run_id)
     while True:
         try:
             await asyncio.sleep(interval)
-            if page.is_closed():
+            if await is_cancel_signalled(run_id) or page.is_closed():
                 break
             await capture_frame_from_page(page, run_id)
         except asyncio.CancelledError:
@@ -156,3 +160,24 @@ async def stop_live_capture(workflow_run_id: str | None, page: Page | None = Non
 
     if page is not None:
         await capture_frame_from_page(page, run_id)
+
+
+async def stop_live_capture_for_run(run_id: str) -> None:
+    """Cancel the capture task for a run (no final frame)."""
+    task = _active_capture_tasks.pop(run_id, None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def clear_live_frames(run_id: str) -> None:
+    client = await _get_redis()
+    if not client:
+        return
+    try:
+        await client.delete(_frame_key(run_id), _meta_key(run_id))
+    except Exception:
+        pass

@@ -165,6 +165,14 @@ async def _execute_browser_search(
     start_time: float,
 ) -> NodeExecutionResult:
     """Executes a real recipe-driven search using Playwright, with AI page analysis and auto-save fallback."""
+    await context.refresh_cancellation()
+    if context.is_cancelled:
+        return NodeExecutionResult(
+            status="CANCELLED",
+            error_message="Cancelled by user",
+            duration_ms=int((time.time() - start_time) * 1000),
+        )
+
     raw_parcel = str(upstream.get("parcel_id") or context.initial_input.get("parcel_id", "") or parcel_id).strip()
     raw_address = str(upstream.get("address") or context.initial_input.get("address", "")).strip()
     raw_owner = str(upstream.get("owner_name") or context.initial_input.get("owner_name", "")).strip()
@@ -757,6 +765,32 @@ async def _execute_browser_search(
         )
     except Exception as exc:
         duration = int((time.time() - start_time) * 1000)
+        try:
+            from app.services.execution_cancel import is_cancel_signalled
+
+            if await is_cancel_signalled(str(context.run_id)) or context.is_cancelled:
+                context.is_cancelled = True
+                return NodeExecutionResult(
+                    status="CANCELLED",
+                    error_message="Cancelled by user",
+                    duration_ms=duration,
+                )
+        except Exception:
+            pass
+        err = str(exc).lower()
+        if "target closed" in err or "browser closed" in err or "connection closed" in err:
+            try:
+                from app.services.execution_cancel import is_cancel_signalled
+
+                if await is_cancel_signalled(str(context.run_id)):
+                    context.is_cancelled = True
+                    return NodeExecutionResult(
+                        status="CANCELLED",
+                        error_message="Cancelled by user",
+                        duration_ms=duration,
+                    )
+            except Exception:
+                pass
         return NodeExecutionResult(
             status="FAILED",
             error_message=f"Browser automation error: {str(exc)}",

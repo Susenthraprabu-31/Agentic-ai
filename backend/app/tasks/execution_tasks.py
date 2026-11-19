@@ -67,6 +67,14 @@ def execute_workflow_run(
                 }
 
             terminal_states = {"COMPLETED", "FAILED", "PARTIALLY_COMPLETED", "CANCELLED"}
+            if run.status == "CANCELLED":
+                logger.info("WorkflowRun %s already cancelled. Skipping execution.", run.id)
+                return {
+                    "workflow_run_id": str(run.id),
+                    "status": run.status,
+                    "duration_ms": run.duration_ms,
+                    "error_message": run.error_message,
+                }
             if run.status in terminal_states:
                 logger.info(
                     "WorkflowRun %s is already in terminal state %s. Skipping redundant execution.",
@@ -96,6 +104,10 @@ def execute_workflow_run(
                     "error_message": run.error_message,
                 }
 
+            stop_watchdog = asyncio.Event()
+            from app.services.execution_cancel import run_cancel_watchdog
+
+            watchdog = asyncio.create_task(run_cancel_watchdog(run_uuid, stop_watchdog))
             try:
                 executor = WorkflowExecutor(session)
                 run = await executor.execute_run(
@@ -127,6 +139,14 @@ def execute_workflow_run(
                 await session.commit()
                 raise
             finally:
+                stop_watchdog.set()
+                watchdog.cancel()
+                try:
+                    await watchdog
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
                 try:
                     await monitor.record_heartbeat(
                         worker_id=worker_id,
