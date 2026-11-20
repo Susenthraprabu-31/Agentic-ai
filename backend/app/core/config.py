@@ -95,7 +95,11 @@ class Settings(BaseSettings):
     PLAYWRIGHT_ALLOW_LOCAL_URLS: bool = True
     BROWSER_LIVE_VIEW_ENABLED: bool = True
     # When true, browser runs headless and only the in-app live viewport is shown (no OS window).
-    BROWSER_LIVE_VIEW_FORCE_HEADLESS: bool = False
+    BROWSER_LIVE_VIEW_FORCE_HEADLESS: bool = True
+    # EC2/Docker/Session 0: fall back to headless instead of failing when no display exists.
+    PLAYWRIGHT_FALLBACK_HEADLESS_NO_DISPLAY: bool = True
+    # Retry launch without channel=chrome when Google Chrome is not installed on the worker host.
+    PLAYWRIGHT_CHANNEL_LAUNCH_FALLBACK: bool = True
     BROWSER_LIVE_VIEW_INTERVAL_SEC: float = 1.25
     BROWSER_LIVE_INPUT_POLL_SEC: float = 0.2
     BROWSER_LIVE_FRAME_TTL_SECONDS: int = 3600
