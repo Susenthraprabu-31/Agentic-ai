@@ -120,13 +120,7 @@ class AIPageAnalyzerService:
         }
 
         async with async_playwright() as p:
-            from app.browser.playwright_proxy import build_playwright_proxy
-
-            launch_kw: dict = {"headless": True}
-            proxy = build_playwright_proxy()
-            if proxy:
-                launch_kw["proxy"] = proxy
-            browser = await p.chromium.launch(**launch_kw)
+            browser = await p.chromium.launch(headless=True)
             context = await browser.new_context()
 
             import re
