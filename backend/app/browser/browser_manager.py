@@ -473,14 +473,21 @@ class BrowserManager:
         page: Page | None = None
 
         try:
-            context = await browser.new_context(
-                viewport={"width": viewport_width, "height": viewport_height},
-                user_agent=DEFAULT_USER_AGENT,
-                locale=locale,
-                timezone_id=timezone_id,
-                ignore_https_errors=True,
-                accept_downloads=True,
-            )
+            context_options: dict = {
+                "viewport": {"width": viewport_width, "height": viewport_height},
+                "user_agent": DEFAULT_USER_AGENT,
+                "locale": locale,
+                "timezone_id": timezone_id,
+                "ignore_https_errors": True,
+                "accept_downloads": True,
+            }
+            from app.browser.miami_dade_tax_auth import resolve_miami_dade_tax_auth_path
+
+            auth_path = resolve_miami_dade_tax_auth_path()
+            if auth_path:
+                context_options["storage_state"] = str(auth_path)
+                logger.info("Using Miami-Dade tax portal storage_state from %s", auth_path)
+            context = await browser.new_context(**context_options)
 
             context.set_default_navigation_timeout(settings.BROWSER_NAVIGATION_TIMEOUT_MS)
             context.set_default_timeout(settings.PLAYWRIGHT_ACTION_TIMEOUT_MS)
