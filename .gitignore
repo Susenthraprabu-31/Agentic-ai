@@ -1,5 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Title Search Platform — Root .gitignore
+
+# Miami-Dade tax Playwright session (sensitive cookies)
+backend/auth.json
+backend/storage/browser_profiles/
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Environment files — NEVER commit secrets
@@ -8,6 +12,10 @@
 .env.*.local
 **/.env
 *.env
+
+# Miami-Dade tax Playwright session (sensitive cookies)
+backend/auth.json
+backend/storage/browser_profiles/
 
 # Local storage, scratch files, and reference dumps
 storage/

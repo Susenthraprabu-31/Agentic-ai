@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     # Miami-Dade county tax portal session export (cookies + local/session storage)
     MIAMI_DADE_TAX_AUTH_ENABLED: bool = True
     MIAMI_DADE_TAX_AUTH_FILE: str = "auth.json"  # relative to backend/ (same folder as .env)
+    TAX_BROWSER_PROFILE_DIR: str = "storage/browser_profiles/miami_dade_tax"
+    TAX_BROWSER_POLICY_FILE: str = "config/tax_browser_policy.json"
+    PLAYWRIGHT_EXTRA_LAUNCH_ARGS: str = ""  # comma-separated; merged into tax browser policy args
     # Webshare (or compatible) residential proxy — applied at Playwright browser launch
     WEBSHARE_PROXY_SERVER: str = ""
     WEBSHARE_PROXY_USERNAME: str = ""
