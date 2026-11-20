@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     BROWSER_LIVE_VIEW_INTERVAL_SEC: float = 1.25
     BROWSER_LIVE_FRAME_TTL_SECONDS: int = 3600
     BROWSER_LIVE_VIEW_JPEG_QUALITY: int = 72
+    # Miami-Dade county tax portal session export (cookies + local/session storage)
+    MIAMI_DADE_TAX_AUTH_ENABLED: bool = True
+    MIAMI_DADE_TAX_AUTH_FILE: str = "auth.json"  # relative to backend/ (same folder as .env)
+    # Webshare (or compatible) residential proxy — applied at Playwright browser launch
+    WEBSHARE_PROXY_SERVER: str = ""
+    WEBSHARE_PROXY_USERNAME: str = ""
+    WEBSHARE_PROXY_PASSWORD: str = ""
 
     # -------------------------------------------------------------------------
     # Document & PDF Retrieval (Phase 3C)
