@@ -288,6 +288,12 @@ class BrowserManager:
                 }
                 if channel:
                     launch_kwargs["channel"] = channel
+                from app.browser.playwright_proxy import build_playwright_proxy, log_proxy_in_use
+
+                playwright_proxy = build_playwright_proxy()
+                if playwright_proxy:
+                    launch_kwargs["proxy"] = playwright_proxy
+                    log_proxy_in_use()
                 self._browser = await browser_type.launch(**launch_kwargs)
 
                 self._browser.on("disconnected", lambda: self._on_browser_disconnected())
