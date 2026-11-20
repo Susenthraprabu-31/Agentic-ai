@@ -258,6 +258,66 @@ async def _stabilize_page_on_portal(page: Page, portal_url: str | None, workflow
     )
 
 
+async def _finish_manual_clearance(
+    page: Page,
+    *,
+    run_id: str,
+    node_id: str | None,
+    portal: str,
+    user_confirmed: bool,
+) -> bool:
+    from app.browser.navigation import ensure_portal_page
+    from app.browser.security_clearance import automation_may_resume
+
+    await page.wait_for_timeout(800)
+    if await automation_may_resume(page, portal):
+        await set_manual_intervention_state(run_id, active=False)
+        await _log_intervention_activity(
+            workflow_run_id=run_id,
+            node_id=node_id,
+            description="Security verification cleared — resuming automation",
+            status="COMPLETED",
+            url=best_page_url(page, portal),
+        )
+        return True
+    if portal and not page.is_closed():
+        try:
+            await ensure_portal_page(
+                page,
+                portal,
+                workflow_run_id=run_id,
+                node_id=node_id,
+                wait_for_mount=True,
+            )
+        except Exception as nav_err:
+            logger.debug("Portal refresh after manual verification: %s", nav_err)
+    if await automation_may_resume(page, portal):
+        await set_manual_intervention_state(run_id, active=False)
+        await _log_intervention_activity(
+            workflow_run_id=run_id,
+            node_id=node_id,
+            description="Security verification cleared after portal refresh",
+            status="COMPLETED",
+            url=best_page_url(page, portal),
+        )
+        return True
+    if user_confirmed:
+        logger.warning(
+            "User confirmed verification on run %s but Cloudflare heuristics still active — resuming anyway",
+            run_id,
+        )
+        await set_manual_intervention_state(run_id, active=False)
+        await _log_intervention_activity(
+            workflow_run_id=run_id,
+            node_id=node_id,
+            description="User confirmed verification — continuing automation",
+            status="COMPLETED",
+            url=best_page_url(page, portal),
+        )
+        return True
+    return False
+
+
 async def wait_for_manual_security_clearance(
     page: Page,
     sec: SecurityDetectionResult,
@@ -342,8 +402,13 @@ async def wait_for_manual_security_clearance(
 
         if await _user_signalled_cleared(run_id):
             logger.info("User signalled security verification complete for run %s", run_id)
-            await page.wait_for_timeout(1500)
-            break
+            return await _finish_manual_clearance(
+                page,
+                run_id=run_id,
+                node_id=node_id,
+                portal=portal,
+                user_confirmed=True,
+            )
 
         now = time.time()
         if now - last_blank_fix >= poll_sec:
@@ -383,19 +448,6 @@ async def wait_for_manual_security_clearance(
                 return True
         except Exception:
             pass
-
-        if await _user_signalled_cleared(run_id):
-            recheck = await SecurityDetector.inspect_page(page)
-            if not recheck.is_detected:
-                await set_manual_intervention_state(run_id, active=False)
-                await _log_intervention_activity(
-                    workflow_run_id=run_id,
-                    node_id=node_id,
-                    description="User confirmed verification — barrier cleared",
-                    status="COMPLETED",
-                    url=best_page_url(page, portal),
-                )
-                return True
 
         await asyncio.sleep(poll_sec)
 

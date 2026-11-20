@@ -77,9 +77,41 @@ async def enqueue_pointer_event(
         return False
 
 
+async def _click_cloudflare_iframe_at_point(page: Page, px: int, py: int) -> bool:
+    """If (px, py) falls inside a challenge iframe, click coordinates within that frame."""
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        fu = (frame.url or "").lower()
+        if "challenges.cloudflare.com" not in fu and "turnstile" not in fu:
+            continue
+        try:
+            frame_el = await frame.frame_element()
+            box = await frame_el.bounding_box()
+            if not box:
+                continue
+            if not (
+                box["x"] <= px <= box["x"] + box["width"]
+                and box["y"] <= py <= box["y"] + box["height"]
+            ):
+                continue
+            lx = px - box["x"]
+            ly = py - box["y"]
+            try:
+                await frame.mouse.click(lx, ly)
+            except Exception:
+                await frame.locator("body").click(position={"x": lx, "y": ly}, timeout=2500)
+            await page.wait_for_timeout(200)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 async def _perform_viewport_click(page: Page, px: int, py: int) -> None:
     """Click viewport coords; also targets Cloudflare/Turnstile iframes and widgets."""
-    await page.mouse.click(px, py)
+    await page.mouse.click(px, py, delay=50)
+    await _click_cloudflare_iframe_at_point(page, px, py)
     await page.wait_for_timeout(150)
     for sel in (
         "#verification-action",

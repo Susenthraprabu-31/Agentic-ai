@@ -127,6 +127,15 @@ class SecurityDetector:
         except Exception:
             title = ""
 
+        if "county-taxes" in (url or "").lower():
+            try:
+                from app.browser.security_clearance import tax_portal_search_ready
+
+                if await tax_portal_search_ready(page):
+                    return SecurityDetectionResult(is_detected=False, url=url, title=title)
+            except Exception:
+                pass
+
         # 1. Check Cloudflare Page Titles
         for cf_title in cls.CLOUDFLARE_TITLES:
             if cf_title in title:
