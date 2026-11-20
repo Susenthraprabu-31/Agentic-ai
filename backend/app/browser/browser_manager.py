@@ -270,6 +270,7 @@ class BrowserManager:
                     or not getattr(settings, "PLAYWRIGHT_HEADLESS", True)
                 )
                 is_visible_mode = wants_visible and not (live_view and force_headless)
+                channel = (getattr(settings, "PLAYWRIGHT_CHANNEL", "") or "").strip() or None
 
                 if live_view and force_headless and wants_visible:
                     logger.info(
@@ -279,8 +280,18 @@ class BrowserManager:
                 if is_visible_mode:
                     display_ok, diagnostic = check_display_available()
                     if not display_ok:
-                        logger.error(diagnostic)
-                        raise RuntimeError(diagnostic)
+                        if getattr(settings, "PLAYWRIGHT_FALLBACK_HEADLESS_NO_DISPLAY", True) and (
+                            live_view or getattr(settings, "BROWSER_LIVE_VIEW_ENABLED", True)
+                        ):
+                            logger.warning(
+                                "%s Using headless %s with in-app live viewport instead.",
+                                diagnostic,
+                                channel or "Chromium",
+                            )
+                            is_visible_mode = False
+                        else:
+                            logger.error(diagnostic)
+                            raise RuntimeError(diagnostic)
 
                 is_headless = not is_visible_mode
                 slow_mo = getattr(settings, "PLAYWRIGHT_SLOW_MO_MS", 0) if is_visible_mode else 0
@@ -298,7 +309,6 @@ class BrowserManager:
                 if is_visible_mode:
                     launch_args.extend(["--start-maximized", "--window-size=1280,800"])
 
-                channel = (getattr(settings, "PLAYWRIGHT_CHANNEL", "") or "").strip() or None
                 logger.info(
                     "Launching Playwright %s (channel=%s, headless=%s, slow_mo=%dms, mode=%s, timeout=%dms)",
                     browser_type_name,
@@ -316,7 +326,24 @@ class BrowserManager:
                 }
                 if channel:
                     launch_kwargs["channel"] = channel
-                self._browser = await browser_type.launch(**launch_kwargs)
+                try:
+                    self._browser = await browser_type.launch(**launch_kwargs)
+                except Exception as launch_exc:
+                    did_retry = False
+                    if channel and getattr(settings, "PLAYWRIGHT_CHANNEL_LAUNCH_FALLBACK", True):
+                        logger.warning(
+                            "Playwright launch with channel=%s failed (%s). Retrying bundled Chromium.",
+                            channel,
+                            launch_exc,
+                        )
+                        launch_kwargs.pop("channel", None)
+                        launch_kwargs["headless"] = True
+                        is_visible_mode = False
+                        self._browser = await browser_type.launch(**launch_kwargs)
+                        did_retry = True
+                    if not did_retry:
+                        raise
+                    logger.info("Playwright using bundled Chromium (headless) after channel launch failure.")
 
                 self._browser.on("disconnected", lambda: self._on_browser_disconnected())
                 self._state = BrowserLifecycleState.READY
