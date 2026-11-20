@@ -444,6 +444,22 @@ export interface BrowserSession {
   closed_at: string | null;
 }
 
+export interface ManualSecurityIntervention {
+  active: boolean;
+  reason?: string;
+  event_type?: string;
+  portal_url?: string;
+  url?: string;
+  started_at?: string;
+  timeout_sec?: number;
+}
+
+export interface ManualInterventionPref {
+  enabled: boolean;
+  default_from_env: boolean;
+  overridden: boolean;
+}
+
 export interface BrowserActivityResponse {
   workflow_run_id: string;
   session_id: string | null;
@@ -454,6 +470,8 @@ export interface BrowserActivityResponse {
   current_action: string | null;
   is_healthy: boolean;
   activities: BrowserActivityItem[];
+  manual_security_intervention?: ManualSecurityIntervention | null;
+  manual_intervention_pref?: ManualInterventionPref | null;
 }
 
 export interface ExecutionDownloadStatus {

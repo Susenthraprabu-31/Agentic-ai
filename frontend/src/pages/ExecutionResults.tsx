@@ -737,7 +737,43 @@ export default function ExecutionResults() {
   const [liveFrameCapturedAt, setLiveFrameCapturedAt] = useState<string | null>(null);
   const [liveFrameError, setLiveFrameError] = useState<string | null>(null);
   const [liveFrameLoading, setLiveFrameLoading] = useState(false);
+  const [securityAckLoading, setSecurityAckLoading] = useState(false);
+  const [manualPrefSaving, setManualPrefSaving] = useState(false);
   const liveFrameObjectUrlRef = useRef<string | null>(null);
+  const appliedStoredManualPref = useRef(false);
+
+  const manualSecurityIntervention = browserActivity?.manual_security_intervention?.active
+    ? browserActivity.manual_security_intervention
+    : null;
+  const manualInterventionEnabled =
+    browserActivity?.manual_intervention_pref?.enabled ??
+    localStorage.getItem("titlemvp_manual_intervention") !== "0";
+
+  const handleManualInterventionToggle = async (enabled: boolean) => {
+    if (!runId) return;
+    setManualPrefSaving(true);
+    try {
+      localStorage.setItem("titlemvp_manual_intervention", enabled ? "1" : "0");
+      const pref = await executionsApi.setManualInterventionEnabled(runId, enabled);
+      setBrowserActivity((prev) =>
+        prev
+          ? {
+              ...prev,
+              manual_intervention_pref: {
+                enabled: pref.enabled,
+                default_from_env: pref.default_from_env,
+                overridden: true,
+              },
+            }
+          : prev
+      );
+    } catch (err: unknown) {
+      const ax = err as { response?: { data?: { detail?: string } } };
+      setErrorMsg(ax.response?.data?.detail || "Could not update manual intervention setting.");
+    } finally {
+      setManualPrefSaving(false);
+    }
+  };
   const [selectedAssessorIndex, setSelectedAssessorIndex] = useState(0);
 
   // Document Viewer & Mistral OCR Modal State
@@ -784,7 +820,31 @@ export default function ExecutionResults() {
 
   useEffect(() => {
     fetchExecutionData();
+    appliedStoredManualPref.current = false;
   }, [runId]);
+
+  useEffect(() => {
+    if (appliedStoredManualPref.current || !runId || !browserActivity?.manual_intervention_pref) {
+      return;
+    }
+    const stored = localStorage.getItem("titlemvp_manual_intervention");
+    if (stored === null) {
+      appliedStoredManualPref.current = true;
+      return;
+    }
+    appliedStoredManualPref.current = true;
+    const want = stored !== "0";
+    if (want !== browserActivity.manual_intervention_pref.enabled) {
+      executionsApi
+        .setManualInterventionEnabled(runId, want)
+        .then((pref) => {
+          setBrowserActivity((prev) =>
+            prev ? { ...prev, manual_intervention_pref: { ...pref, overridden: true } } : prev
+          );
+        })
+        .catch(() => null);
+    }
+  }, [runId, browserActivity?.manual_intervention_pref]);
 
   const refreshLiveChromiumFrame = useCallback(async () => {
     if (!runId) return;
@@ -831,12 +891,22 @@ export default function ExecutionResults() {
       ? terminalStates.includes(run.status.toUpperCase())
       : true;
     refreshLiveChromiumFrame();
-    const pollMs = runIsTerminal ? 8000 : 1400;
+    const pollMs = runIsTerminal ? 8000 : manualSecurityIntervention ? 700 : 1400;
     const interval = setInterval(() => {
       refreshLiveChromiumFrame();
     }, pollMs);
     return () => clearInterval(interval);
-  }, [activeTab, runId, run?.status, refreshLiveChromiumFrame]);
+  }, [activeTab, runId, run?.status, refreshLiveChromiumFrame, manualSecurityIntervention]);
+
+  useEffect(() => {
+    if (activeTab !== "live-chromium" || !runId) return;
+    const terminalStates = ["COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"];
+    if (run && terminalStates.includes(run.status.toUpperCase())) return;
+    const interval = setInterval(() => {
+      executionsApi.getBrowserActivity(runId).then(setBrowserActivity).catch(() => null);
+    }, manualSecurityIntervention ? 1500 : 4000);
+    return () => clearInterval(interval);
+  }, [activeTab, runId, run?.status, manualSecurityIntervention]);
 
   useEffect(() => {
     return () => {
@@ -860,6 +930,21 @@ export default function ExecutionResults() {
 
     return () => clearInterval(interval);
   }, [run?.status, runId]);
+
+  const handleSecurityInterventionComplete = async () => {
+    if (!runId) return;
+    setSecurityAckLoading(true);
+    try {
+      await executionsApi.signalSecurityInterventionComplete(runId);
+      await fetchExecutionData(true);
+      await refreshLiveChromiumFrame();
+    } catch (err: unknown) {
+      const ax = err as { response?: { data?: { detail?: string } } };
+      setErrorMsg(ax.response?.data?.detail || "Could not signal verification complete.");
+    } finally {
+      setSecurityAckLoading(false);
+    }
+  };
 
   const handleCancel = async () => {
     if (!runId || !confirm("Request cancellation of this execution?")) return;
@@ -1668,6 +1753,46 @@ export default function ExecutionResults() {
         {activeTab === "live-chromium" && (
           <Card>
             <CardContent className="p-5 space-y-4">
+              {!manualInterventionEnabled && (
+                <p className="text-xs text-slate-500 border border-dashed border-slate-200 rounded-lg px-3 py-2 bg-slate-50">
+                  Manual CAPTCHA help is <strong>off</strong> for this run — Cloudflare will fail fast instead of
+                  pausing. Turn on <strong>Manual CAPTCHA help</strong> above before the next security challenge.
+                </p>
+              )}
+              {manualInterventionEnabled && manualSecurityIntervention && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 space-y-3">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                    <div className="space-y-1 text-sm text-amber-950">
+                      <p className="font-semibold">Cloudflare / CAPTCHA — manual verification required</p>
+                      <p className="text-xs text-amber-900/90 leading-relaxed">
+                        Automation is paused. Complete the challenge in the{" "}
+                        <strong>Playwright Chrome window on the Celery worker machine</strong> (set{" "}
+                        <code className="text-[11px] bg-amber-100 px-1 rounded">PLAYWRIGHT_HEADLESS=false</code> if
+                        you do not see a desktop browser). The view below is a live screenshot only — use the worker
+                        window to click Turnstile/CAPTCHA. When done, click the button below.
+                      </p>
+                      {manualSecurityIntervention.reason && (
+                        <p className="text-[11px] font-mono text-amber-800/80 truncate">
+                          {manualSecurityIntervention.reason}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="bg-amber-700 hover:bg-amber-800 text-white"
+                    disabled={securityAckLoading}
+                    onClick={() => handleSecurityInterventionComplete()}
+                  >
+                    {securityAckLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                    ) : null}
+                    I&apos;ve completed verification — continue automation
+                  </Button>
+                </div>
+              )}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-50 border rounded-lg">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
@@ -1702,7 +1827,25 @@ export default function ExecutionResults() {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 justify-end">
+                  <label
+                    className={`flex items-center gap-2 text-xs border rounded-md px-2.5 py-1.5 bg-white ${
+                      manualInterventionEnabled
+                        ? "border-emerald-300 text-emerald-900"
+                        : "border-slate-200 text-slate-600"
+                    }`}
+                    title="When on, automation pauses on Cloudflare/CAPTCHA so you can solve it in the worker Chrome window"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      checked={manualInterventionEnabled}
+                      disabled={manualPrefSaving}
+                      onChange={(e) => handleManualInterventionToggle(e.target.checked)}
+                    />
+                    <span className="font-medium whitespace-nowrap">Manual CAPTCHA help</span>
+                    {manualPrefSaving && <Loader2 className="w-3 h-3 animate-spin text-slate-400" />}
+                  </label>
                   {liveFrameCapturedAt && (
                     <span className="text-[10px] text-muted-foreground font-mono">
                       Frame {new Date(liveFrameCapturedAt).toLocaleTimeString()}

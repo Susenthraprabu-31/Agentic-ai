@@ -16,6 +16,7 @@ import type {
   DocumentArtifact,
   ExecutionDownloadStatus,
   ExecutionResultsResponse,
+  ManualInterventionPref,
   NodeRun,
   WorkflowRun,
 } from "../types";
@@ -116,6 +117,23 @@ export const executionsApi = {
   },
 
   /** Fetch latest live Chromium viewport frame (JPEG blob from Playwright) */
+  async setManualInterventionEnabled(
+    runId: string,
+    enabled: boolean
+  ): Promise<ManualInterventionPref & { workflow_run_id: string }> {
+    const res = await apiClient.put(`/executions/${runId}/manual-intervention`, { enabled });
+    return res.data;
+  },
+
+  async signalSecurityInterventionComplete(runId: string): Promise<{
+    workflow_run_id: string;
+    acknowledged: boolean;
+    message: string;
+  }> {
+    const res = await apiClient.post(`/executions/${runId}/security-intervention/complete`);
+    return res.data;
+  },
+
   async fetchBrowserLiveViewBlob(runId: string): Promise<{
     blob: Blob;
     frameUrl?: string;
