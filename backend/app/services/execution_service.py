@@ -142,6 +142,13 @@ class ExecutionService:
         await self.db.commit()
         await self.db.refresh(run)
 
+        try:
+            from app.services.security_manual_intervention import init_run_manual_intervention_pref
+
+            await init_run_manual_intervention_pref(str(run.id))
+        except Exception:
+            pass
+
         # 5. Dispatch to Celery background worker
         task_id = None
         try:

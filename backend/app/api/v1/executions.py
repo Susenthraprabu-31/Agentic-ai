@@ -266,6 +266,14 @@ async def get_execution_browser_activity(
     if run_row.status.upper() in ("CANCELLED", "CANCEL_REQUESTED"):
         browser_state = "CLOSED"
 
+    from app.services.security_manual_intervention import (
+        get_manual_intervention_pref,
+        get_manual_intervention_state,
+    )
+
+    manual_state = await get_manual_intervention_state(str(run_id))
+    manual_pref = await get_manual_intervention_pref(str(run_id))
+
     return {
         "workflow_run_id": str(run_id),
         "session_id": latest_session.session_id if latest_session else None,
@@ -276,6 +284,91 @@ async def get_execution_browser_activity(
         "current_action": latest_session.current_action if latest_session else None,
         "is_healthy": latest_session.is_healthy if latest_session else True,
         "activities": activity_events,
+        "manual_security_intervention": manual_state,
+        "manual_intervention_pref": manual_pref,
+    }
+
+
+@router.get(
+    "/{run_id}/manual-intervention",
+    summary="Get manual Cloudflare/CAPTCHA assistance preference for this run",
+)
+async def get_manual_intervention(
+    run_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    service = ExecutionService(db)
+    await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
+    from app.services.security_manual_intervention import get_manual_intervention_pref
+
+    return {"workflow_run_id": str(run_id), **await get_manual_intervention_pref(str(run_id))}
+
+
+@router.put(
+    "/{run_id}/manual-intervention",
+    summary="Enable or disable manual Cloudflare/CAPTCHA assistance for this run",
+)
+async def put_manual_intervention(
+    run_id: uuid.UUID,
+    body: dict,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    service = ExecutionService(db)
+    await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
+    if "enabled" not in body:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="enabled (boolean) required")
+    from app.services.security_manual_intervention import (
+        get_manual_intervention_pref,
+        set_manual_intervention_pref,
+    )
+
+    await set_manual_intervention_pref(str(run_id), bool(body["enabled"]))
+    pref = await get_manual_intervention_pref(str(run_id))
+    return {"workflow_run_id": str(run_id), **pref}
+
+
+@router.get(
+    "/{run_id}/security-intervention",
+    summary="Get active manual Cloudflare/CAPTCHA intervention state",
+)
+async def get_security_intervention(
+    run_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    service = ExecutionService(db)
+    await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
+    from app.services.security_manual_intervention import get_manual_intervention_state
+
+    state = await get_manual_intervention_state(str(run_id))
+    return {"workflow_run_id": str(run_id), "manual_security_intervention": state}
+
+
+@router.post(
+    "/{run_id}/security-intervention/complete",
+    summary="Signal that human completed Cloudflare/CAPTCHA verification",
+)
+async def complete_security_intervention(
+    run_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    service = ExecutionService(db)
+    await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
+    from app.services.security_manual_intervention import signal_manual_intervention_complete
+
+    ok = await signal_manual_intervention_complete(str(run_id))
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not record verification signal. Try again or check Redis.",
+        )
+    return {
+        "workflow_run_id": str(run_id),
+        "acknowledged": True,
+        "message": "Verification noted. Automation will resume when the barrier clears.",
     }
 
 

@@ -117,6 +117,35 @@ class PlaywrightStepRunner:
             return None
         return self._last_fill_selector
 
+    def _portal_url_from_context(self, context_vars: dict[str, Any]) -> str:
+        return str(
+            context_vars.get("search_url")
+            or context_vars.get("portal_url")
+            or context_vars.get("_tax_portal_search_url")
+            or ""
+        ).strip()
+
+    async def _halt_or_wait_for_manual_security(
+        self,
+        sec: SecurityDetectionResult,
+        context_vars: dict[str, Any],
+    ) -> None:
+        try:
+            await EvidenceCollector.capture_evidence(
+                self.page, self.run_id, self.node_id, reason=sec.reason
+            )
+        except Exception:
+            pass
+        from app.services.security_manual_intervention import raise_or_resolve_security
+
+        await raise_or_resolve_security(
+            self.page,
+            sec,
+            workflow_run_id=str(self.run_id),
+            node_id=str(self.node_id),
+            portal_url=self._portal_url_from_context(context_vars),
+        )
+
     async def _fill_address_field_fallbacks(
         self,
         val: str,
@@ -375,10 +404,7 @@ class PlaywrightStepRunner:
             if not security_barrier_mode:
                 sec_dom = await SecurityDetector.inspect_page(self.page)
                 if sec_dom.is_detected:
-                    evidence = await EvidenceCollector.capture_evidence(
-                        self.page, self.run_id, self.node_id, reason=sec_dom.reason
-                    )
-                    raise SecurityChallengeException(sec_dom)
+                    await self._halt_or_wait_for_manual_security(sec_dom, context_vars)
 
             loc = step.get("locator") or step.get("selector") or {}
             selector = self._build_playwright_selector(loc)
@@ -406,18 +432,12 @@ class PlaywrightStepRunner:
                         if response:
                             sec_resp = await SecurityDetector.inspect_response(response, url)
                             if sec_resp and sec_resp.is_detected:
-                                evidence = await EvidenceCollector.capture_evidence(
-                                    self.page, self.run_id, self.node_id, reason=sec_resp.reason
-                                )
-                                raise SecurityChallengeException(sec_resp)
+                                await self._halt_or_wait_for_manual_security(sec_resp, context_vars)
 
                         # Security inspection on DOM post-load
                         sec_dom = await SecurityDetector.inspect_page(self.page)
                         if sec_dom.is_detected:
-                            evidence = await EvidenceCollector.capture_evidence(
-                                self.page, self.run_id, self.node_id, reason=sec_dom.reason
-                            )
-                            raise SecurityChallengeException(sec_dom)
+                            await self._halt_or_wait_for_manual_security(sec_dom, context_vars)
 
                     # Step-by-step wait for portal stabilization
                     await self.page.wait_for_timeout(1200)
@@ -447,10 +467,7 @@ class PlaywrightStepRunner:
                     )
                     sec_resp = await SecurityDetector.inspect_response(response, full_get_url)
                     if sec_resp and sec_resp.is_detected:
-                        evidence = await EvidenceCollector.capture_evidence(
-                            self.page, self.run_id, self.node_id, reason=sec_resp.reason
-                        )
-                        raise SecurityChallengeException(sec_resp)
+                        await self._halt_or_wait_for_manual_security(sec_resp, context_vars)
 
                     await self._dismiss_disclaimer_if_present()
 
@@ -824,10 +841,7 @@ class PlaywrightStepRunner:
                         # Post-click security check
                         sec_dom = await SecurityDetector.inspect_page(self.page)
                         if sec_dom.is_detected:
-                            evidence = await EvidenceCollector.capture_evidence(
-                                self.page, self.run_id, self.node_id, reason=sec_dom.reason
-                            )
-                            raise SecurityChallengeException(sec_dom)
+                            await self._halt_or_wait_for_manual_security(sec_dom, context_vars)
 
                 elif action == "click_if_visible":
                     target = await self._resolve_target_scope(selector)

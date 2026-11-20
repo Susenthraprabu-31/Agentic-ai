@@ -2877,6 +2877,8 @@ class PageSearchAI:
             except Exception:
                 pass
 
+        from app.browser.navigation import best_page_url
+
         portal_url = (portal_url or "").strip()
         if portal_url:
             from app.browser.navigation import ensure_portal_page
@@ -2965,23 +2967,52 @@ class PageSearchAI:
         if _plan_indicates_security_barrier(plan):
             diag = plan.get("playwright_diagnostic_steps") or DEFAULT_SECURITY_DIAGNOSTIC_STEPS
             barrier_type = plan.get("security_barrier_type") or "unknown"
-            await _log(
-                "security_barrier",
-                f"Security barrier ({barrier_type}); running Playwright challenge steps",
-                2,
-                status="RUNNING",
-            )
             security_plan = dict(plan)
-            try:
-                await _run_security_diagnostic_steps(page, diag, workflow_run_id, node_id)
-            except Exception as diag_err:
-                logger.warning("Security barrier steps error: %s", diag_err)
-            await page.wait_for_timeout(1200)
-            sec_after = await _page_security_hint(page)
-            if sec_after:
+            from app.browser.security_detector import SecurityDetectionResult
+            from app.services.security_manual_intervention import (
+                is_manual_intervention_enabled_for_run,
+                try_manual_security_resolution,
+            )
+
+            sec_result = SecurityDetectionResult(
+                is_detected=True,
+                event_type=barrier_type,
+                url=best_page_url(page, portal_url) if portal_url else page.url,
+                reason=plan.get("reasoning") or f"Security barrier ({barrier_type})",
+            )
+            barrier_cleared = False
+            if await is_manual_intervention_enabled_for_run(workflow_run_id):
                 await _log(
                     "security_barrier",
-                    f"Security barrier still present after challenge steps: {sec_after}",
+                    f"Security barrier ({barrier_type}); waiting for manual verification",
+                    2,
+                    status="RUNNING",
+                )
+                barrier_cleared = await try_manual_security_resolution(
+                    page,
+                    sec_result,
+                    workflow_run_id=workflow_run_id,
+                    node_id=node_id,
+                    portal_url=portal_url,
+                )
+            else:
+                await _log(
+                    "security_barrier",
+                    f"Security barrier ({barrier_type}); running Playwright challenge steps",
+                    2,
+                    status="RUNNING",
+                )
+                try:
+                    await _run_security_diagnostic_steps(page, diag, workflow_run_id, node_id)
+                except Exception as diag_err:
+                    logger.warning("Security barrier steps error: %s", diag_err)
+                await page.wait_for_timeout(1200)
+                barrier_cleared = not bool(await _page_security_hint(page))
+
+            if not barrier_cleared:
+                await _log(
+                    "security_barrier",
+                    f"Security barrier still present ({barrier_type})",
                     2,
                     status="FAILED",
                 )

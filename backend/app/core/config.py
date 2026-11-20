@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     WEBSHARE_PROXY_SERVER: str = ""
     WEBSHARE_PROXY_USERNAME: str = ""
     WEBSHARE_PROXY_PASSWORD: str = ""
+    # Pause on Cloudflare/CAPTCHA for human verification (worker Chrome window + UI confirm)
+    BROWSER_SECURITY_MANUAL_INTERVENTION_ENABLED: bool = True
+    BROWSER_MANUAL_INTERVENTION_TIMEOUT_SEC: int = 600
+    BROWSER_MANUAL_INTERVENTION_POLL_SEC: float = 2.0
 
     # -------------------------------------------------------------------------
     # Document & PDF Retrieval (Phase 3C)
