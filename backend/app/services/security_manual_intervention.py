@@ -225,13 +225,14 @@ async def _log_intervention_activity(
 
 
 async def _stabilize_page_on_portal(page: Page, portal_url: str | None, workflow_run_id: str, node_id: str | None) -> None:
-    """Prevent about:blank drift while the human solves a challenge."""
+    """Prevent about:blank drift without reloading an in-progress Cloudflare challenge."""
     target = (portal_url or "").strip()
     if not target:
         target = best_page_url(page)
     if not target or target.startswith("about:"):
         return
-    if page_needs_portal_navigation(page, target) or (page.url or "").startswith("about:"):
+    curr = page.url or ""
+    if curr.startswith("about:") or curr == "chrome-error://chromewebdata/":
         await ensure_portal_page(
             page,
             target,
@@ -239,6 +240,22 @@ async def _stabilize_page_on_portal(page: Page, portal_url: str | None, workflow
             node_id=node_id,
             wait_for_mount=False,
         )
+        return
+    if not page_needs_portal_navigation(page, target):
+        return
+    try:
+        sec = await SecurityDetector.inspect_page(page)
+        if sec.is_detected:
+            return
+    except Exception:
+        pass
+    await ensure_portal_page(
+        page,
+        target,
+        workflow_run_id=workflow_run_id,
+        node_id=node_id,
+        wait_for_mount=False,
+    )
 
 
 async def wait_for_manual_security_clearance(
@@ -321,6 +338,13 @@ async def wait_for_manual_security_clearance(
                 await _stabilize_page_on_portal(page, portal, run_id, node_id)
             except Exception as stab_err:
                 logger.debug("Portal stabilize during manual wait: %s", stab_err)
+
+        try:
+            from app.services.browser_live_input import apply_pending_live_inputs
+
+            await apply_pending_live_inputs(page, run_id)
+        except Exception as input_err:
+            logger.debug("Live input drain: %s", input_err)
 
         try:
             from app.services.browser_live_view import capture_frame_from_page

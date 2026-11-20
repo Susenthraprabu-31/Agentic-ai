@@ -737,6 +737,8 @@ export default function ExecutionResults() {
   const [liveFrameCapturedAt, setLiveFrameCapturedAt] = useState<string | null>(null);
   const [liveFrameError, setLiveFrameError] = useState<string | null>(null);
   const [liveFrameLoading, setLiveFrameLoading] = useState(false);
+  const [liveClickSending, setLiveClickSending] = useState(false);
+  const liveImageRef = useRef<HTMLImageElement | null>(null);
   const [securityAckLoading, setSecurityAckLoading] = useState(false);
   const [manualPrefSaving, setManualPrefSaving] = useState(false);
   const liveFrameObjectUrlRef = useRef<string | null>(null);
@@ -845,6 +847,30 @@ export default function ExecutionResults() {
         .catch(() => null);
     }
   }, [runId, browserActivity?.manual_intervention_pref]);
+
+  const handleLiveViewportClick = async (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!runId || !manualInterventionEnabled) return;
+    const img = liveImageRef.current;
+    if (!img) return;
+    const rect = img.getBoundingClientRect();
+    if (rect.width < 8 || rect.height < 8) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setLiveClickSending(true);
+    try {
+      await executionsApi.sendBrowserLiveClick(runId, {
+        x,
+        y,
+        client_width: rect.width,
+        client_height: rect.height,
+      });
+      setTimeout(() => refreshLiveChromiumFrame(), 400);
+    } catch {
+      setErrorMsg("Click could not reach the browser worker — is the run still active?");
+    } finally {
+      setLiveClickSending(false);
+    }
+  };
 
   const refreshLiveChromiumFrame = useCallback(async () => {
     if (!runId) return;
@@ -1766,11 +1792,10 @@ export default function ExecutionResults() {
                     <div className="space-y-1 text-sm text-amber-950">
                       <p className="font-semibold">Cloudflare / CAPTCHA — manual verification required</p>
                       <p className="text-xs text-amber-900/90 leading-relaxed">
-                        Automation is paused. Complete the challenge in the{" "}
-                        <strong>Playwright Chrome window on the Celery worker machine</strong> (set{" "}
-                        <code className="text-[11px] bg-amber-100 px-1 rounded">PLAYWRIGHT_HEADLESS=false</code> if
-                        you do not see a desktop browser). The view below is a live screenshot only — use the worker
-                        window to click Turnstile/CAPTCHA. When done, click the button below.
+                        Automation is paused on this Cloudflare screen.{" "}
+                        <strong>Click directly on the live image below</strong> (e.g. the &quot;Verify you are
+                        human&quot; box) — your click is relayed to Playwright on the worker. After the page loads past
+                        the challenge, click the continue button.
                       </p>
                       {manualSecurityIntervention.reason && (
                         <p className="text-[11px] font-mono text-amber-800/80 truncate">
@@ -1869,12 +1894,27 @@ export default function ExecutionResults() {
                 </div>
               </div>
 
-              <div className="rounded-lg border border-slate-200 bg-slate-900 overflow-hidden shadow-inner min-h-[420px] flex items-center justify-center">
+              <div className="rounded-lg border border-slate-200 bg-slate-900 overflow-hidden shadow-inner min-h-[420px] flex items-center justify-center relative">
+                {manualInterventionEnabled && liveFrameSrc && (
+                  <p className="absolute top-2 left-2 z-10 text-[10px] font-medium bg-black/70 text-white px-2 py-1 rounded pointer-events-none">
+                    {liveClickSending ? "Sending click…" : "Click on this image to interact (Turnstile / CAPTCHA)"}
+                  </p>
+                )}
                 {liveFrameSrc ? (
                   <img
+                    ref={liveImageRef}
                     src={liveFrameSrc}
                     alt="Live Chromium browser viewport"
-                    className="w-full h-auto max-h-[70vh] object-contain bg-white"
+                    className={`w-full h-auto max-h-[70vh] object-contain bg-white ${
+                      manualInterventionEnabled ? "cursor-crosshair" : "cursor-default"
+                    }`}
+                    onClick={manualInterventionEnabled ? handleLiveViewportClick : undefined}
+                    role={manualInterventionEnabled ? "button" : undefined}
+                    title={
+                      manualInterventionEnabled
+                        ? "Click to send mouse click to Playwright"
+                        : "Live viewport preview"
+                    }
                   />
                 ) : (
                   <div className="text-center py-16 px-6 text-slate-400 space-y-2">

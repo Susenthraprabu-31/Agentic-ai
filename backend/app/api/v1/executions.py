@@ -403,8 +403,48 @@ async def get_execution_browser_live_view(
         headers["X-Frame-Url"] = str(meta["url"])[:2048]
     if meta.get("captured_at"):
         headers["X-Frame-Captured-At"] = str(meta["captured_at"])
+    if meta.get("viewport_width"):
+        headers["X-Viewport-Width"] = str(meta["viewport_width"])
+    if meta.get("viewport_height"):
+        headers["X-Viewport-Height"] = str(meta["viewport_height"])
 
     return Response(content=frame, media_type="image/jpeg", headers=headers)
+
+
+@router.post(
+    "/{run_id}/browser-live-view/pointer",
+    summary="Send a click on the live Chromium viewport (relays to worker Playwright)",
+)
+async def post_browser_live_pointer(
+    run_id: uuid.UUID,
+    body: dict,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    service = ExecutionService(db)
+    await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
+    for field in ("x", "y", "client_width", "client_height"):
+        if field not in body:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{field} is required",
+            )
+    from app.services.browser_live_input import enqueue_pointer_event
+
+    ok = await enqueue_pointer_event(
+        str(run_id),
+        action=str(body.get("action") or "click"),
+        x=float(body["x"]),
+        y=float(body["y"]),
+        client_width=float(body["client_width"]),
+        client_height=float(body["client_height"]),
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not queue pointer event (is Redis available and the worker running?)",
+        )
+    return {"workflow_run_id": str(run_id), "queued": True, "action": body.get("action") or "click"}
 
 
 @router.get(

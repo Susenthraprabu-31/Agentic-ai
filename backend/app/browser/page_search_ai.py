@@ -3144,12 +3144,65 @@ class PageSearchAI:
         playwright_executed = False
         if validation.get("ok") and runtime_steps:
             try:
-                from app.browser.step_runner import PlaywrightStepRunner
+                from app.browser.step_runner import PlaywrightStepRunner, SecurityChallengeException
 
                 runner = PlaywrightStepRunner(page, str(workflow_run_id or ""), str(node_id or ""))
                 await runner.execute_steps(runtime_steps, context_vars)
                 playwright_executed = True
                 await _log("execute_steps", "Executed AI-generated Playwright search instructions", 4)
+            except SecurityChallengeException as sec_exc:
+                from app.services.security_manual_intervention import try_manual_security_resolution
+
+                logger.warning("Playwright steps hit security barrier: %s", sec_exc.result.reason)
+                cleared = await try_manual_security_resolution(
+                    page,
+                    sec_exc.result,
+                    workflow_run_id=workflow_run_id,
+                    node_id=node_id,
+                    portal_url=portal_url,
+                )
+                if cleared:
+                    try:
+                        runner = PlaywrightStepRunner(page, str(workflow_run_id or ""), str(node_id or ""))
+                        await runner.execute_steps(runtime_steps, context_vars)
+                        playwright_executed = True
+                        await _log("execute_steps", "Resumed Playwright steps after manual verification", 4)
+                    except SecurityChallengeException as sec_again:
+                        await _log(
+                            "security_barrier",
+                            sec_again.result.reason or "Security barrier after manual verification",
+                            4,
+                            status="FAILED",
+                        )
+                        return {
+                            "success": False,
+                            "plan": plan,
+                            "record": {
+                                "search_failed": True,
+                                "failure_reason": "security_barrier",
+                                "query_value": query_value,
+                            },
+                            "detail_opened": False,
+                            "downloaded_documents": [],
+                        }
+                else:
+                    await _log(
+                        "security_barrier",
+                        sec_exc.result.reason or "Security barrier",
+                        4,
+                        status="FAILED",
+                    )
+                    return {
+                        "success": False,
+                        "plan": plan,
+                        "record": {
+                            "search_failed": True,
+                            "failure_reason": "security_barrier",
+                            "query_value": query_value,
+                        },
+                        "detail_opened": False,
+                        "downloaded_documents": [],
+                    }
             except Exception as pw_err:
                 logger.warning("AI Playwright step execution failed (%s). Falling back to direct plan executor.", pw_err)
                 await _log("execute_steps", f"Playwright steps failed, using direct executor: {pw_err}", 4, status="WARNING")
