@@ -106,6 +106,15 @@ async def capture_frame_from_page(page: Page, run_id: str) -> bool:
     try:
         if page.is_closed():
             return False
+        from app.browser.navigation import _url_is_blank_or_error, recover_blank_main_frame
+        from app.browser.run_portal_context import get_run_portal_url
+
+        portal_hint = get_run_portal_url(run_id) or ""
+        if portal_hint and _url_is_blank_or_error(page.url or ""):
+            await recover_blank_main_frame(page, portal_hint, workflow_run_id=run_id)
+        from app.browser.navigation import best_page_url
+
+        display_url = best_page_url(page, portal_hint)
         vp = page.viewport_size or {"width": 1280, "height": 800}
         jpeg = await page.screenshot(
             type="jpeg",
@@ -116,7 +125,7 @@ async def capture_frame_from_page(page: Page, run_id: str) -> bool:
         await publish_frame(
             run_id,
             jpeg,
-            url=page.url or None,
+            url=display_url or page.url or None,
             viewport_width=int(vp.get("width") or 1280),
             viewport_height=int(vp.get("height") or 800),
         )

@@ -69,6 +69,31 @@ async def portal_content_in_child_frame(page: Page, portal_url: str) -> bool:
     return False
 
 
+async def recover_blank_main_frame(
+    page: Page,
+    portal_url: str,
+    *,
+    timeout_ms: int | None = None,
+    workflow_run_id: str | None = None,
+    node_id: str | None = None,
+) -> bool:
+    """Re-open the portal when Playwright's main frame drifted to about:blank."""
+    portal_url = (portal_url or "").strip()
+    if not portal_url or page.is_closed():
+        return False
+    if not _url_is_blank_or_error(page.url or ""):
+        return True
+    logger.warning("Main frame is %s; recovering with portal URL %s", page.url, portal_url)
+    return await ensure_portal_page(
+        page,
+        portal_url,
+        timeout_ms=timeout_ms,
+        workflow_run_id=workflow_run_id,
+        node_id=node_id,
+        wait_for_mount=True,
+    )
+
+
 def page_needs_portal_navigation(page: Page, portal_url: str) -> bool:
     """True when the Playwright page is blank or not on the target portal host."""
     portal_url = (portal_url or "").strip()

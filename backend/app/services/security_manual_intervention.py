@@ -278,6 +278,20 @@ async def wait_for_manual_security_clearance(
     timeout_sec = int(getattr(settings, "BROWSER_MANUAL_INTERVENTION_TIMEOUT_SEC", 600))
     poll_sec = float(getattr(settings, "BROWSER_MANUAL_INTERVENTION_POLL_SEC", 2.0))
     portal = (portal_url or sec.url or best_page_url(page) or "").strip()
+    if portal:
+        from app.browser.run_portal_context import set_run_portal_url
+
+        set_run_portal_url(run_id, portal)
+
+    try:
+        from app.browser.navigation import recover_blank_main_frame
+        from app.browser.tax_verification_challenge import attempt_county_taxes_human_verification
+
+        if portal:
+            await recover_blank_main_frame(page, portal, workflow_run_id=run_id, node_id=node_id)
+        await attempt_county_taxes_human_verification(page)
+    except Exception as auto_exc:
+        logger.debug("Automated county-taxes verification before manual wait: %s", auto_exc)
 
     try:
         await EvidenceCollector.capture_evidence(

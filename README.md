@@ -244,12 +244,23 @@ PONG
 
 ### Celery Worker
 
-Start the Celery worker from the backend directory:
+Start the Celery worker from the backend directory. Use **concurrency 2** so up to two workflow automations can run in parallel (matches `WORKFLOW_MAX_CONCURRENT_EXECUTIONS` in `.env`).
+
+**Linux / macOS:**
 
 ```bash
 cd backend
-celery -A app.tasks.celery_app worker --loglevel=info --queues=executions,ai
+celery -A app.tasks.celery_app worker --loglevel=info --queues=executions,ai --concurrency=2
 ```
+
+**Windows (required: `threads` pool — the default `solo` pool runs one task at a time):**
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m celery -A app.tasks.celery_app worker -l info -P threads --concurrency=2 -Q executions,ai
+```
+
+Or run `backend\start_celery.ps1`, which uses the same settings.
 
 ---
 

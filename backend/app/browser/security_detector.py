@@ -38,6 +38,7 @@ class SecurityDetector:
 
     CLOUDFLARE_BODY_PHRASES = [
         "performing security verification",
+        "verify you are human",
         "verifies you are not a bot",
         "security service to protect against malicious bots",
         "cf-challenge",
@@ -45,6 +46,9 @@ class SecurityDetector:
     ]
 
     CLOUDFLARE_SELECTORS = [
+        "#verification-action",
+        ".verification-action",
+        "#verification-widget",
         "#challenge-running",
         "#cf-challenge-running",
         ".cf-browser-verification",

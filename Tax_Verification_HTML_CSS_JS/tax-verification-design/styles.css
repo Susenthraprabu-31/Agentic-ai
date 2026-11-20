@@ -1,0 +1,39 @@
+:root{color-scheme:light;--ink:#313131;--muted:#555;--rule:#ededed}
+*{box-sizing:border-box}
+html{min-height:100%;background:#f7f9fc}
+body{margin:0;min-height:100vh;border-top:6px solid #f7f9fc;border-bottom:1px solid #dce5f1;background:#fff;color:var(--ink);font-family:Arial,Helvetica,sans-serif;-webkit-font-smoothing:antialiased}
+button,a{-webkit-tap-highlight-color:transparent}
+.page{width:min(588px,calc(100% - 48px));min-height:calc(100vh - 7px);margin-inline:auto;display:flex;flex-direction:column}
+.verification{padding-top:82px;flex:1}
+h1{margin:0 0 2px;font-size:30px;font-weight:700;line-height:36px;letter-spacing:.25px}
+h2{margin:0 0 4px;font-size:18px;font-weight:700;line-height:23px;letter-spacing:.05px}
+.description{margin:0;font-size:12px;line-height:16px;letter-spacing:.05px}
+.verification-widget{display:flex;align-items:center;justify-content:space-between;width:198px;height:43px;margin-top:21px;padding:5px 6px;background:#fafafa;border:1px solid #dedede;border-radius:2px;box-shadow:0 1px 2px #00000005}
+.verification-action{display:flex;align-items:center;gap:6px;min-width:0;padding:0;border:0;background:transparent;color:#242424;font:10px Arial,Helvetica,sans-serif;white-space:nowrap;cursor:pointer;text-align:left;height:30px}
+.checkbox{display:grid;place-items:center;width:15px;height:16px;flex-shrink:0;background:#fff;border:1px solid #4a4a4a;border-radius:1px;box-shadow:inset 0 0 0 .3px #999}
+.checkmark{display:none;width:15px;height:15px;fill:none;stroke:#fff;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}
+.spinner{display:none;width:15px;height:15px;flex-shrink:0;border:2px solid #d4d4d4;border-top-color:#ee8d24;border-radius:50%;animation:spin .8s linear infinite}
+.brand{width:48px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;line-height:1}
+.cloud{display:block;width:30px;height:14px;margin-bottom:0}
+.brand-name{font-size:6px;font-weight:800;letter-spacing:.65px;margin-bottom:2px}
+.widget-links{display:flex;align-items:center;font-size:5px;color:#444}
+.widget-links button{padding:0;background:none;border:0;color:inherit;font:inherit;text-decoration:underline;cursor:pointer}
+.demo-status{font-size:11px;line-height:16px;color:var(--muted);margin:10px 0 0;max-width:360px}
+.demo-status:empty{display:none}
+.footer{padding:11px 0 10px;margin-top:40px;border-top:1px solid var(--rule);font-size:8px;line-height:12px;color:#505050;text-align:center}
+.footer a,.footer-link{color:#191960;text-decoration:underline}
+.footer-link{padding:0;background:transparent;border:0;font:inherit;cursor:pointer}
+.separator{padding-inline:3px;color:#777}
+[data-state="checking"] .checkbox{display:none}
+[data-state="checking"] .spinner{display:block}
+[data-state="verified"] .checkbox{background:#16894c;border-color:#16894c;box-shadow:none}
+[data-state="verified"] .checkmark{display:block}
+button:focus-visible,a:focus-visible{outline:2px solid #316bea;outline-offset:3px}
+.verification-action:disabled{cursor:wait}
+dialog{max-width:min(420px,calc(100vw - 40px));border:1px solid #ddd;border-radius:8px;padding:24px;color:var(--ink);font-size:14px;line-height:1.6;box-shadow:0 12px 60px #0002}
+dialog::backdrop{background:#0004}
+dialog h3{margin:0 0 10px}
+.dialog-close{padding:8px 20px;background:#333;color:white;border:0;border-radius:4px;cursor:pointer}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:600px){.verification{padding-top:56px}h1{font-size:27px;line-height:34px}h2{font-size:17px}.description{font-size:12px;line-height:18px}.footer{font-size:9px;line-height:14px;padding-bottom:16px}}
+@media(prefers-reduced-motion:reduce){.spinner{animation:none}}

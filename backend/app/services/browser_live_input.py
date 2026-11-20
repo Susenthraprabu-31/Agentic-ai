@@ -82,6 +82,9 @@ async def _perform_viewport_click(page: Page, px: int, py: int) -> None:
     await page.mouse.click(px, py)
     await page.wait_for_timeout(150)
     for sel in (
+        "#verification-action",
+        ".verification-action",
+        "button:has-text('Verify you are human')",
         "iframe[src*='challenges.cloudflare.com']",
         "iframe[src*='turnstile']",
         ".cf-turnstile",
