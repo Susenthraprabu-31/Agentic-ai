@@ -18,6 +18,7 @@ _redis_client: Any | None = None
 _redis_loop: Any | None = None
 
 _active_capture_tasks: dict[str, asyncio.Task[None]] = {}
+_active_input_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 def _frame_key(run_id: str) -> str:
@@ -153,6 +154,24 @@ async def _capture_loop(page: Page, run_id: str, interval: float) -> None:
             logger.debug("Live Chromium capture loop for %s: %s", run_id, exc)
 
 
+async def _input_poll_loop(page: Page, run_id: str, interval: float) -> None:
+    from app.services.execution_cancel import is_cancel_signalled
+
+    while True:
+        try:
+            if await is_cancel_signalled(run_id) or page.is_closed():
+                break
+            from app.services.browser_live_input import apply_pending_live_inputs
+
+            await apply_pending_live_inputs(page, run_id)
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.debug("Live input poll for %s: %s", run_id, exc)
+            await asyncio.sleep(interval)
+
+
 def start_live_capture(page: Page, workflow_run_id: str | None) -> None:
     """Start periodic viewport capture for the given workflow run."""
     if not workflow_run_id or not getattr(settings, "BROWSER_LIVE_VIEW_ENABLED", True):
@@ -161,9 +180,15 @@ def start_live_capture(page: Page, workflow_run_id: str | None) -> None:
     prev = _active_capture_tasks.pop(run_id, None)
     if prev and not prev.done():
         prev.cancel()
+    prev_in = _active_input_tasks.pop(run_id, None)
+    if prev_in and not prev_in.done():
+        prev_in.cancel()
     interval = float(getattr(settings, "BROWSER_LIVE_VIEW_INTERVAL_SEC", 1.25))
     task = asyncio.create_task(_capture_loop(page, run_id, interval))
     _active_capture_tasks[run_id] = task
+    poll = float(getattr(settings, "BROWSER_LIVE_INPUT_POLL_SEC", 0.2))
+    in_task = asyncio.create_task(_input_poll_loop(page, run_id, poll))
+    _active_input_tasks[run_id] = in_task
 
 
 async def stop_live_capture(workflow_run_id: str | None, page: Page | None = None) -> None:
@@ -180,6 +205,13 @@ async def stop_live_capture(workflow_run_id: str | None, page: Page | None = Non
             pass
         except Exception:
             pass
+    in_task = _active_input_tasks.pop(run_id, None)
+    if in_task and not in_task.done():
+        in_task.cancel()
+        try:
+            await in_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     if page is not None:
         await capture_frame_from_page(page, run_id)
@@ -192,6 +224,13 @@ async def stop_live_capture_for_run(run_id: str) -> None:
         task.cancel()
         try:
             await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    in_task = _active_input_tasks.pop(run_id, None)
+    if in_task and not in_task.done():
+        in_task.cancel()
+        try:
+            await in_task
         except (asyncio.CancelledError, Exception):
             pass
 

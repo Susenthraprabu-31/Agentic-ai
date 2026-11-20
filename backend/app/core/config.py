@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     # When true, Chromium runs headless and the Live Chromium Browser tab shows the viewport (no OS popup).
     BROWSER_LIVE_VIEW_FORCE_HEADLESS: bool = True
     BROWSER_LIVE_VIEW_INTERVAL_SEC: float = 1.25
+    BROWSER_LIVE_INPUT_POLL_SEC: float = 0.2
     BROWSER_LIVE_FRAME_TTL_SECONDS: int = 3600
     BROWSER_LIVE_VIEW_JPEG_QUALITY: int = 72
     # Miami-Dade county tax portal session export (cookies + local/session storage)
