@@ -58,6 +58,8 @@ async def publish_frame(
     image_bytes: bytes,
     *,
     url: str | None = None,
+    viewport_width: int | None = None,
+    viewport_height: int | None = None,
 ) -> None:
     """Store the latest JPEG frame and metadata for a workflow run."""
     client = await _get_redis()
@@ -65,7 +67,11 @@ async def publish_frame(
         return
     ttl = max(60, int(getattr(settings, "BROWSER_LIVE_FRAME_TTL_SECONDS", 3600)))
     captured_at = datetime.now(timezone.utc).isoformat()
-    meta = {"url": url or "", "captured_at": captured_at, "content_type": "image/jpeg"}
+    meta: dict[str, Any] = {"url": url or "", "captured_at": captured_at, "content_type": "image/jpeg"}
+    if viewport_width:
+        meta["viewport_width"] = viewport_width
+    if viewport_height:
+        meta["viewport_height"] = viewport_height
     try:
         pipe = client.pipeline()
         pipe.set(_frame_key(run_id), image_bytes, ex=ttl)
@@ -99,13 +105,20 @@ async def capture_frame_from_page(page: Page, run_id: str) -> bool:
     try:
         if page.is_closed():
             return False
+        vp = page.viewport_size or {"width": 1280, "height": 800}
         jpeg = await page.screenshot(
             type="jpeg",
             quality=int(getattr(settings, "BROWSER_LIVE_VIEW_JPEG_QUALITY", 72)),
             full_page=False,
             timeout=8000,
         )
-        await publish_frame(run_id, jpeg, url=page.url or None)
+        await publish_frame(
+            run_id,
+            jpeg,
+            url=page.url or None,
+            viewport_width=int(vp.get("width") or 1280),
+            viewport_height=int(vp.get("height") or 800),
+        )
         return bool(jpeg)
     except Exception as exc:
         logger.debug("Live Chromium frame capture for %s: %s", run_id, exc)
@@ -117,13 +130,23 @@ async def _capture_loop(page: Page, run_id: str, interval: float) -> None:
 
     if await is_cancel_signalled(run_id):
         return
-    await capture_frame_from_page(page, run_id)
+
+    async def _tick() -> None:
+        try:
+            from app.services.browser_live_input import apply_pending_live_inputs
+
+            await apply_pending_live_inputs(page, run_id)
+        except Exception:
+            pass
+        await capture_frame_from_page(page, run_id)
+
+    await _tick()
     while True:
         try:
             await asyncio.sleep(interval)
             if await is_cancel_signalled(run_id) or page.is_closed():
                 break
-            await capture_frame_from_page(page, run_id)
+            await _tick()
         except asyncio.CancelledError:
             break
         except Exception as exc:

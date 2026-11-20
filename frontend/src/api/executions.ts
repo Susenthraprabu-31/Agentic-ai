@@ -134,10 +134,23 @@ export const executionsApi = {
     return res.data;
   },
 
+  async sendBrowserLiveClick(
+    runId: string,
+    payload: { x: number; y: number; client_width: number; client_height: number }
+  ): Promise<{ queued: boolean }> {
+    const res = await apiClient.post(`/executions/${runId}/browser-live-view/pointer`, {
+      action: "click",
+      ...payload,
+    });
+    return res.data;
+  },
+
   async fetchBrowserLiveViewBlob(runId: string): Promise<{
     blob: Blob;
     frameUrl?: string;
     capturedAt?: string;
+    viewportWidth?: number;
+    viewportHeight?: number;
   }> {
     const res = await apiClient.get(`/executions/${runId}/browser-live-view`, {
       responseType: "blob",
@@ -145,10 +158,14 @@ export const executionsApi = {
       headers: { Accept: "image/jpeg" },
     });
     const headers = res.headers as Record<string, string | undefined>;
+    const vw = headers["x-viewport-width"];
+    const vh = headers["x-viewport-height"];
     return {
       blob: res.data as Blob,
       frameUrl: headers["x-frame-url"],
       capturedAt: headers["x-frame-captured-at"],
+      viewportWidth: vw ? parseInt(vw, 10) : undefined,
+      viewportHeight: vh ? parseInt(vh, 10) : undefined,
     };
   },
 };

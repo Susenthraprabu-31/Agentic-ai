@@ -102,6 +102,15 @@ async def ensure_portal_page(
     portal_url = (portal_url or "").strip()
     if not portal_url:
         return False
+    if workflow_run_id:
+        try:
+            from app.services.security_manual_intervention import get_manual_intervention_state
+
+            manual = await get_manual_intervention_state(str(workflow_run_id))
+            if manual and manual.get("active") and not _url_is_blank_or_error(page.url or ""):
+                return True
+        except Exception:
+            pass
     if not page_needs_portal_navigation(page, portal_url):
         return not _url_is_blank_or_error(page.url or "")
 
