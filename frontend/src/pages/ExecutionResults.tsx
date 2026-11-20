@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { mapClickToDisplayedImage } from "../utils/liveViewportClick";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useSearchParams, useNavigate, Link } from "react-router-dom";
 import {
   Activity,
   AlertTriangle,
@@ -1802,7 +1802,11 @@ export default function ExecutionResults() {
                         Automation is paused on this Cloudflare screen.{" "}
                         <strong>Click directly on the live image below</strong> (e.g. the &quot;Verify you are
                         human&quot; box) — your click is relayed to Playwright on the worker. After the page loads past
-                        the challenge, click the continue button.
+                        the challenge, click the continue button. To bypass Cloudflare on future runs,{" "}
+                        <Link to="/settings#cloudflare-browser" className="underline font-medium">
+                          create a tax browser profile
+                        </Link>{" "}
+                        on your PC and upload <code className="text-[10px]">auth.json</code>.
                       </p>
                       {manualSecurityIntervention.reason && (
                         <p className="text-[11px] font-mono text-amber-800/80 truncate">

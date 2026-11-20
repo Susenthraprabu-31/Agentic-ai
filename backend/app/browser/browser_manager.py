@@ -481,12 +481,24 @@ class BrowserManager:
                 "ignore_https_errors": True,
                 "accept_downloads": True,
             }
-            from app.browser.miami_dade_tax_auth import resolve_miami_dade_tax_auth_path
+            from app.browser.tax_browser_profile import (
+                get_tax_browser_context_options,
+                should_apply_tax_browser_context,
+            )
 
-            auth_path = resolve_miami_dade_tax_auth_path()
-            if auth_path:
-                context_options["storage_state"] = str(auth_path)
-                logger.info("Using Miami-Dade tax portal storage_state from %s", auth_path)
+            if should_apply_tax_browser_context():
+                tax_opts = get_tax_browser_context_options(
+                    viewport_width=viewport_width,
+                    viewport_height=viewport_height,
+                    locale=locale,
+                    timezone_id=timezone_id,
+                )
+                context_options.update(tax_opts)
+                if tax_opts.get("storage_state"):
+                    logger.info(
+                        "Using Miami-Dade tax browser profile (storage_state=%s)",
+                        tax_opts["storage_state"],
+                    )
             context = await browser.new_context(**context_options)
 
             context.set_default_navigation_timeout(settings.BROWSER_NAVIGATION_TIMEOUT_MS)
