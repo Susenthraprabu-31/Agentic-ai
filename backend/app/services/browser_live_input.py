@@ -77,6 +77,50 @@ async def enqueue_pointer_event(
         return False
 
 
+async def _perform_viewport_click(page: Page, px: int, py: int) -> None:
+    """Click viewport coords; also targets Cloudflare/Turnstile iframes and widgets."""
+    await page.mouse.click(px, py)
+    await page.wait_for_timeout(150)
+    for sel in (
+        "iframe[src*='challenges.cloudflare.com']",
+        "iframe[src*='turnstile']",
+        ".cf-turnstile",
+        "#cf-turnstile",
+        "div.cf-turnstile",
+    ):
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            box = await loc.bounding_box(timeout=1200)
+            if not box:
+                continue
+            cx = box["x"] + box["width"] / 2
+            cy = box["y"] + box["height"] / 2
+            await page.mouse.click(cx, cy)
+            await page.wait_for_timeout(200)
+            try:
+                await loc.click(force=True, timeout=2000)
+            except Exception:
+                pass
+            break
+        except Exception:
+            continue
+    for frame in page.frames:
+        fu = (frame.url or "").lower()
+        if "challenges.cloudflare.com" not in fu and "turnstile" not in fu:
+            continue
+        try:
+            await frame.mouse.click(px, py)
+        except Exception:
+            try:
+                body = frame.locator("body")
+                if await body.count() > 0:
+                    await body.click(position={"x": px, "y": py}, timeout=2000)
+            except Exception:
+                pass
+
+
 async def apply_pending_live_inputs(page: Page, run_id: str) -> int:
     """Drain queued UI clicks onto the worker Playwright page (viewport coordinates)."""
     client = await _redis()
@@ -104,7 +148,7 @@ async def apply_pending_live_inputs(page: Page, run_id: str) -> int:
             px = max(0, min(vw - 1, px))
             py = max(0, min(vh - 1, py))
             if action == "click":
-                await page.mouse.click(px, py)
+                await _perform_viewport_click(page, px, py)
                 applied += 1
                 logger.info("Live UI click at (%s, %s) for run %s", px, py, run_id)
             await page.wait_for_timeout(300)

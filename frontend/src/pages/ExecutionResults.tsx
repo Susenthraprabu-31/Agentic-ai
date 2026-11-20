@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { mapClickToDisplayedImage } from "../utils/liveViewportClick";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   Activity,
@@ -751,6 +752,11 @@ export default function ExecutionResults() {
     browserActivity?.manual_intervention_pref?.enabled ??
     localStorage.getItem("titlemvp_manual_intervention") !== "0";
 
+  const runIsLive = run
+    ? !["COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"].includes(run.status.toUpperCase())
+    : false;
+  const liveInteractEnabled = Boolean(runIsLive && liveFrameSrc);
+
   const handleManualInterventionToggle = async (enabled: boolean) => {
     if (!runId) return;
     setManualPrefSaving(true);
@@ -848,25 +854,26 @@ export default function ExecutionResults() {
     }
   }, [runId, browserActivity?.manual_intervention_pref]);
 
-  const handleLiveViewportClick = async (e: React.MouseEvent<HTMLImageElement>) => {
-    if (!runId || !manualInterventionEnabled) return;
+  const handleLiveViewportClick = async (e: MouseEvent<HTMLImageElement>) => {
+    if (!runId || !liveInteractEnabled) return;
     const img = liveImageRef.current;
     if (!img) return;
-    const rect = img.getBoundingClientRect();
-    if (rect.width < 8 || rect.height < 8) return;
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const mapped = mapClickToDisplayedImage(img, e.clientX, e.clientY);
+    if (!mapped) {
+      setErrorMsg("Click inside the page image (not the letterbox bars).");
+      return;
+    }
     setLiveClickSending(true);
+    setErrorMsg(null);
     try {
-      await executionsApi.sendBrowserLiveClick(runId, {
-        x,
-        y,
-        client_width: rect.width,
-        client_height: rect.height,
-      });
-      setTimeout(() => refreshLiveChromiumFrame(), 400);
+      await executionsApi.sendBrowserLiveClick(runId, mapped);
+      for (const delay of [250, 600, 1200]) {
+        window.setTimeout(() => refreshLiveChromiumFrame(), delay);
+      }
     } catch {
-      setErrorMsg("Click could not reach the browser worker — is the run still active?");
+      setErrorMsg(
+        "Click could not reach the worker — restart Celery, confirm Redis matches API, and keep the run BUSY."
+      );
     } finally {
       setLiveClickSending(false);
     }
@@ -1895,9 +1902,9 @@ export default function ExecutionResults() {
               </div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-900 overflow-hidden shadow-inner min-h-[420px] flex items-center justify-center relative">
-                {manualInterventionEnabled && liveFrameSrc && (
+                {liveInteractEnabled && (
                   <p className="absolute top-2 left-2 z-10 text-[10px] font-medium bg-black/70 text-white px-2 py-1 rounded pointer-events-none">
-                    {liveClickSending ? "Sending click…" : "Click on this image to interact (Turnstile / CAPTCHA)"}
+                    {liveClickSending ? "Sending click…" : "Click the page — hits Playwright in ~0.2s"}
                   </p>
                 )}
                 {liveFrameSrc ? (
@@ -1905,14 +1912,16 @@ export default function ExecutionResults() {
                     ref={liveImageRef}
                     src={liveFrameSrc}
                     alt="Live Chromium browser viewport"
-                    className={`w-full h-auto max-h-[70vh] object-contain bg-white ${
-                      manualInterventionEnabled ? "cursor-crosshair" : "cursor-default"
+                    className={`w-full h-auto max-h-[70vh] object-contain bg-white select-none ${
+                      liveInteractEnabled ? "cursor-crosshair" : "cursor-default"
                     }`}
-                    onClick={manualInterventionEnabled ? handleLiveViewportClick : undefined}
-                    role={manualInterventionEnabled ? "button" : undefined}
+                    onClick={liveInteractEnabled ? handleLiveViewportClick : undefined}
+                    onDragStart={(ev) => ev.preventDefault()}
+                    role={liveInteractEnabled ? "button" : undefined}
+                    tabIndex={liveInteractEnabled ? 0 : undefined}
                     title={
-                      manualInterventionEnabled
-                        ? "Click to send mouse click to Playwright"
+                      liveInteractEnabled
+                        ? "Click to send mouse click to Playwright (use Manual CAPTCHA help to pause automation)"
                         : "Live viewport preview"
                     }
                   />
