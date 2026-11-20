@@ -2038,39 +2038,18 @@ SECURITY_PROMPT_SUFFIX = """
 9. When **security_barrier_detected** is true, rule 8 overrides rules 1–7: return only **playwright_diagnostic_steps** (click/fill/wait as needed) and null out all search selectors.
 """
 
-DEFAULT_SECURITY_DIAGNOSTIC_STEPS: list[dict[str, Any]] = [
-    {
-        "action": "screenshot",
-        "description": "Security barrier before recovery",
-    },
-    {
-        "action": "wait",
-        "duration": 2000,
-        "description": "Let challenge widget load",
-    },
-    {
-        "action": "wait_for_selector",
-        "selector": ".cf-turnstile, iframe[src*='challenges.cloudflare.com'], #challenge-form",
-        "state": "visible",
-        "timeout_ms": 20000,
-        "optional": True,
-    },
-    {
-        "action": "click_if_visible",
-        "selector": ".cf-turnstile",
-        "description": "Activate Turnstile widget",
-        "optional": True,
-    },
-    {
-        "action": "wait",
-        "duration": 5000,
-        "description": "Wait for Cloudflare verification",
-    },
-    {
-        "action": "screenshot",
-        "description": "After security challenge interaction",
-    },
-]
+def _default_security_diagnostic_steps() -> list[dict[str, Any]]:
+    from app.browser.tax_verification_challenge import county_taxes_security_diagnostic_steps
+
+    return county_taxes_security_diagnostic_steps() + [
+        {
+            "action": "screenshot",
+            "description": "After security challenge interaction",
+        },
+    ]
+
+
+DEFAULT_SECURITY_DIAGNOSTIC_STEPS: list[dict[str, Any]] = _default_security_diagnostic_steps()
 
 def _ai_system_prompt() -> str:
     return SYSTEM_PROMPT_ASSESSOR + VISION_PROMPT_SUFFIX + SECURITY_PROMPT_SUFFIX
@@ -2098,7 +2077,7 @@ def _sanitize_diagnostic_steps(steps: list[dict[str, Any]] | None) -> list[dict[
         action = str(step.get("action") or "").lower().strip()
         if action in allowed:
             out.append(step)
-    return out or list(DEFAULT_SECURITY_DIAGNOSTIC_STEPS)
+    return out or _default_security_diagnostic_steps()
 
 
 def _security_barrier_plan(
@@ -2152,8 +2131,16 @@ async def _run_security_diagnostic_steps(
     steps: list[dict[str, Any]],
     workflow_run_id: str | None,
     node_id: str | None,
+    portal_url: str | None = None,
 ) -> None:
+    from app.browser.tax_verification_challenge import attempt_county_taxes_human_verification
     from app.browser.step_runner import PlaywrightStepRunner
+
+    try:
+        await attempt_county_taxes_human_verification(page)
+        await page.wait_for_timeout(800)
+    except Exception as exc:
+        logger.debug("County-taxes verification click attempt: %s", exc)
 
     runner = PlaywrightStepRunner(page, str(workflow_run_id or ""), str(node_id or ""))
     await runner.execute_steps(
@@ -2161,6 +2148,15 @@ async def _run_security_diagnostic_steps(
         {},
         security_barrier_mode=True,
     )
+    if portal_url:
+        from app.browser.navigation import recover_blank_main_frame
+
+        await recover_blank_main_frame(
+            page,
+            portal_url,
+            workflow_run_id=workflow_run_id,
+            node_id=node_id,
+        )
 
 
 SYSTEM_PROMPT_ASSESSOR = """You analyze property appraiser, assessor, and county tax collector websites and return Playwright CSS selectors to run a search.
@@ -2302,15 +2298,18 @@ class PageSearchAI:
             return None
 
         portal_hint = (snapshot.get("url") or "").strip()
-        if portal_hint and (page.url or "").startswith("about:"):
-            from app.browser.navigation import ensure_portal_page
+        if workflow_run_id:
+            from app.browser.run_portal_context import get_run_portal_url
 
-            await ensure_portal_page(
+            portal_hint = portal_hint or (get_run_portal_url(workflow_run_id) or "")
+        if portal_hint and (page.url or "").startswith("about:"):
+            from app.browser.navigation import recover_blank_main_frame
+
+            await recover_blank_main_frame(
                 page,
                 portal_hint,
                 workflow_run_id=workflow_run_id,
                 node_id=node_id,
-                wait_for_mount=False,
             )
             try:
                 png = await page.screenshot(full_page=True, type="png", timeout=15000)
@@ -2880,6 +2879,10 @@ class PageSearchAI:
         from app.browser.navigation import best_page_url
 
         portal_url = (portal_url or "").strip()
+        if workflow_run_id and portal_url:
+            from app.browser.run_portal_context import set_run_portal_url
+
+            set_run_portal_url(str(workflow_run_id), portal_url)
         if portal_url:
             from app.browser.navigation import ensure_portal_page
 
@@ -2946,6 +2949,34 @@ class PageSearchAI:
         except Exception as prep_err:
             logger.debug("Portal prep before AI snapshot: %s", prep_err)
 
+        if portal_url:
+            from app.browser.navigation import recover_blank_main_frame
+            from app.browser.tax_verification_challenge import (
+                attempt_county_taxes_human_verification,
+                is_county_taxes_verification_page,
+            )
+
+            await recover_blank_main_frame(
+                page,
+                portal_url,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            )
+            if await is_county_taxes_verification_page(page):
+                await _log(
+                    "security_barrier",
+                    "County-taxes human verification; running automated click",
+                    1,
+                    status="RUNNING",
+                )
+                await attempt_county_taxes_human_verification(page)
+                await recover_blank_main_frame(
+                    page,
+                    portal_url,
+                    workflow_run_id=workflow_run_id,
+                    node_id=node_id,
+                )
+
         snapshot = await self.extract_snapshot(page)
         plan_seed: dict[str, Any] = {"_tax_portal_search_url": portal_url or page.url or ""}
 
@@ -3003,10 +3034,21 @@ class PageSearchAI:
                     status="RUNNING",
                 )
                 try:
-                    await _run_security_diagnostic_steps(page, diag, workflow_run_id, node_id)
+                    await _run_security_diagnostic_steps(
+                        page, diag, workflow_run_id, node_id, portal_url=portal_url
+                    )
                 except Exception as diag_err:
                     logger.warning("Security barrier steps error: %s", diag_err)
                 await page.wait_for_timeout(1200)
+                if portal_url:
+                    from app.browser.navigation import recover_blank_main_frame
+
+                    await recover_blank_main_frame(
+                        page,
+                        portal_url,
+                        workflow_run_id=workflow_run_id,
+                        node_id=node_id,
+                    )
                 barrier_cleared = not bool(await _page_security_hint(page))
 
             if not barrier_cleared:

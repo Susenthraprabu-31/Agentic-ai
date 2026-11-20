@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
+    # Local worker: use threads pool on Windows (solo runs one task at a time).
+    CELERY_WORKER_CONCURRENCY: int = 2
+    WORKFLOW_MAX_CONCURRENT_EXECUTIONS: int = 2
 
     # -------------------------------------------------------------------------
     # Security / JWT
@@ -83,16 +86,16 @@ class Settings(BaseSettings):
     PLAYWRIGHT_SLOW_MO_MS: int = 300
     PLAYWRIGHT_KEEP_BROWSER_OPEN_SECONDS: int = 5
     PLAYWRIGHT_BROWSER_MODE: str = "local_visible"
-    PLAYWRIGHT_BROWSER: str = "chromium"
-    # Use installed browser binary: "chrome", "msedge", or "" for bundled Chromium only.
-    PLAYWRIGHT_CHANNEL: str = ""
+    PLAYWRIGHT_BROWSER: str = "chromium"  # Playwright API; use PLAYWRIGHT_CHANNEL for the real binary
+    # Installed browser: "chrome", "msedge", or "" for bundled Chromium (Docker/Linux workers).
+    PLAYWRIGHT_CHANNEL: str = "chrome"
     PLAYWRIGHT_NAVIGATION_TIMEOUT_MS: int = 60000
     PLAYWRIGHT_ACTION_TIMEOUT_MS: int = 25000
     PLAYWRIGHT_EVIDENCE_DIR: str = "storage/evidence"
     PLAYWRIGHT_ALLOW_LOCAL_URLS: bool = True
     BROWSER_LIVE_VIEW_ENABLED: bool = True
-    # When true, Chromium runs headless and the Live Chromium Browser tab shows the viewport (no OS popup).
-    BROWSER_LIVE_VIEW_FORCE_HEADLESS: bool = True
+    # When true, browser runs headless and only the in-app live viewport is shown (no OS window).
+    BROWSER_LIVE_VIEW_FORCE_HEADLESS: bool = False
     BROWSER_LIVE_VIEW_INTERVAL_SEC: float = 1.25
     BROWSER_LIVE_INPUT_POLL_SEC: float = 0.2
     BROWSER_LIVE_FRAME_TTL_SECONDS: int = 3600

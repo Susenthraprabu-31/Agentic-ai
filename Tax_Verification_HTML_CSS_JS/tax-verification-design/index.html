@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Local visual recreation of a security verification screen. This demo performs no real verification.">
+  <title>Security verification — visual demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page">
+    <main class="verification" aria-labelledby="site-name">
+      <h1 id="site-name">county-taxes.net</h1>
+      <h2>Performing security verification</h2>
+      <p class="description">This website uses a security service to protect against malicious bots. This page is displayed while the website verifies you are not a bot.</p>
+
+      <div class="verification-widget" id="verification-widget" data-state="idle">
+        <button class="verification-action" id="verification-action" type="button" aria-label="Run local verification animation demo" aria-describedby="demo-status">
+          <span class="checkbox" aria-hidden="true">
+            <svg class="checkmark" viewBox="0 0 18 18"><path d="m4 9 3.2 3.2L14 5.5"/></svg>
+          </span>
+          <span class="spinner" aria-hidden="true"></span>
+          <span class="action-label" id="action-label">Verify you are human</span>
+        </button>
+        <div class="brand" aria-label="Cloudflare visual reference">
+          <svg class="cloud" viewBox="0 0 68 30" aria-hidden="true">
+            <path fill="#fbad41" d="M49 25H27.5a9 9 0 0 1-1-17.9A13 13 0 0 1 51 9.2 8 8 0 1 1 49 25Z"/>
+            <path fill="#f48120" d="M9 25a7.5 7.5 0 0 1 3.4-14.2 10.6 10.6 0 0 1 20.1-1.1A8 8 0 0 1 40 21.1L38.5 25Z"/>
+            <path fill="#f48120" d="M5 25h56v2H5z"/>
+          </svg>
+          <span class="brand-name">CLOUDFLARE</span>
+          <div class="widget-links"><button type="button" data-info="privacy">Privacy</button><span> · </span><button type="button" data-info="help">Help</button></div>
+        </div>
+      </div>
+      <p id="demo-status" class="demo-status" role="status" aria-live="polite"></p>
+    </main>
+
+    <footer class="footer">
+      <div>Ray ID: <span id="ray-id">a583ed5f6f9a3ae9</span></div>
+      <div>Performance and Security by <a href="https://www.cloudflare.com/" target="_blank" rel="noopener noreferrer">Cloudflare</a><span class="separator"> | </span><button type="button" class="footer-link" data-info="privacy">Privacy</button></div>
+    </footer>
+  </div>
+  <dialog id="info-dialog" aria-labelledby="dialog-title">
+    <h3 id="dialog-title">Visual demo</h3>
+    <p>This is a local HTML/CSS/JavaScript recreation. It does not connect to Cloudflare, validate a user, set clearance cookies, or unblock any website. The displayed Ray ID is sample text.</p>
+    <form method="dialog"><button class="dialog-close">Close</button></form>
+  </dialog>
+  <script src="script.js"></script>
+</body>
+</html>

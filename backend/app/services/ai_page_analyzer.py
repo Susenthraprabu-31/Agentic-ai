@@ -120,7 +120,11 @@ class AIPageAnalyzerService:
         }
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            channel = (getattr(settings, "PLAYWRIGHT_CHANNEL", "") or "").strip() or None
+            launch_kw: dict = {"headless": True}
+            if channel:
+                launch_kw["channel"] = channel
+            browser = await p.chromium.launch(**launch_kw)
             context = await browser.new_context()
 
             import re

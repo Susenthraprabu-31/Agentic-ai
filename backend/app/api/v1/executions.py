@@ -374,7 +374,7 @@ async def complete_security_intervention(
 
 @router.get(
     "/{run_id}/browser-live-view",
-    summary="Get latest live Chromium viewport frame for workflow execution",
+    summary="Get latest live Chrome viewport frame for workflow execution",
     responses={
         200: {"content": {"image/jpeg": {}}},
         404: {"description": "No live frame available for this run"},
@@ -385,7 +385,7 @@ async def get_execution_browser_live_view(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> Response:
-    """Return the most recent Playwright Chromium viewport JPEG captured during this run."""
+    """Return the most recent Playwright Chrome viewport JPEG captured during this run."""
     service = ExecutionService(db)
     await service.get_execution(run_id=run_id, user_id=current_user.id, is_superuser=current_user.is_superuser)
 
@@ -395,7 +395,7 @@ async def get_execution_browser_live_view(
     if not frame:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No live Chromium browser frame is available for this execution yet.",
+            detail="No live Chrome browser frame is available for this execution yet.",
         )
 
     headers: dict[str, str] = {"Cache-Control": "no-store, no-cache, must-revalidate"}
@@ -413,7 +413,7 @@ async def get_execution_browser_live_view(
 
 @router.post(
     "/{run_id}/browser-live-view/pointer",
-    summary="Send a click on the live Chromium viewport (relays to worker Playwright)",
+    summary="Send a click on the live Chrome viewport (relays to worker Playwright)",
 )
 async def post_browser_live_pointer(
     run_id: uuid.UUID,

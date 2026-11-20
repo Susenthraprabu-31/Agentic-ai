@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import os
 from typing import AsyncGenerator
 import uuid
+import weakref
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
@@ -15,6 +16,15 @@ from app.models.browser_session import BrowserLifecycleState
 from app.services.browser_session_service import BrowserSessionService
 
 logger = get_logger(__name__)
+
+
+def effective_playwright_browser_type() -> str:
+    """Session/logging label: installed Chrome/Edge channel, else bundled Chromium."""
+    channel = (getattr(settings, "PLAYWRIGHT_CHANNEL", "") or "").strip()
+    if channel:
+        return channel
+    return getattr(settings, "PLAYWRIGHT_BROWSER", "chromium")
+
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -82,14 +92,17 @@ def check_display_available() -> tuple[bool, str | None]:
 class BrowserManager:
     """Manages the Playwright runtime and Browser instance lifecycle with health tracking and recovery."""
 
-    _instance: "BrowserManager | None" = None
+    _instances: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, BrowserManager]" = (
+        weakref.WeakKeyDictionary()
+    )
 
     def __init__(self) -> None:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock: asyncio.Lock | None = None
-        self._isolated_context_lock: asyncio.Lock | None = None
+        self._isolated_context_semaphore: asyncio.Semaphore | None = None
+        self._isolated_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
         # Resilience & Lifecycle State
         self._state: BrowserLifecycleState = BrowserLifecycleState.CLOSED
@@ -103,6 +116,7 @@ class BrowserManager:
         self._session_service = BrowserSessionService()
         self._current_workflow_run_id: uuid.UUID | None = None
         self._live_capture_page: Page | None = None
+        self._live_pages_by_run: dict[str, Page] = {}
 
     def _get_lock(self) -> asyncio.Lock:
         current_loop = asyncio.get_running_loop()
@@ -110,18 +124,32 @@ class BrowserManager:
             self._lock = asyncio.Lock()
         return self._lock
 
-    def _get_isolated_context_lock(self) -> asyncio.Lock:
-        """Serializes full browser context lifetimes (assessor + tax cannot share concurrent Playwright access)."""
+    def _get_isolated_context_semaphore(self) -> asyncio.Semaphore:
+        """Limits concurrent isolated contexts per asyncio event loop (Celery thread)."""
         current_loop = asyncio.get_running_loop()
-        if self._isolated_context_lock is None or self._loop != current_loop:
-            self._isolated_context_lock = asyncio.Lock()
-        return self._isolated_context_lock
+        if (
+            self._isolated_context_semaphore is None
+            or self._isolated_semaphore_loop is not current_loop
+        ):
+            limit = max(
+                1,
+                min(
+                    int(getattr(settings, "WORKFLOW_MAX_CONCURRENT_EXECUTIONS", 2)),
+                    int(getattr(settings, "BROWSER_MAX_CONTEXTS_PER_WORKER", 5)),
+                ),
+            )
+            self._isolated_context_semaphore = asyncio.Semaphore(limit)
+            self._isolated_semaphore_loop = current_loop
+        return self._isolated_context_semaphore
 
     @classmethod
     async def get_instance(cls) -> "BrowserManager":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        loop = asyncio.get_running_loop()
+        manager = cls._instances.get(loop)
+        if manager is None:
+            manager = cls()
+            cls._instances[loop] = manager
+        return manager
 
     @property
     def state(self) -> BrowserLifecycleState:
@@ -245,7 +273,7 @@ class BrowserManager:
 
                 if live_view and force_headless and wants_visible:
                     logger.info(
-                        "Live Chromium UI enabled — running Playwright headless (no separate desktop browser window)."
+                        "Live Chrome viewport enabled — running Playwright headless (no separate desktop browser window)."
                     )
 
                 if is_visible_mode:
@@ -272,9 +300,9 @@ class BrowserManager:
 
                 channel = (getattr(settings, "PLAYWRIGHT_CHANNEL", "") or "").strip() or None
                 logger.info(
-                    "Launching %s browser (channel=%s, headless=%s, slow_mo=%dms, mode=%s, timeout=%dms)",
+                    "Launching Playwright %s (channel=%s, headless=%s, slow_mo=%dms, mode=%s, timeout=%dms)",
                     browser_type_name,
-                    channel or "bundled",
+                    channel or "bundled-chromium",
                     is_headless,
                     slow_mo,
                     getattr(settings, "PLAYWRIGHT_BROWSER_MODE", "headless"),
@@ -296,7 +324,7 @@ class BrowserManager:
                 await self._session_service.register_session(
                     session_id=self._current_session_id,
                     workflow_run_id=workflow_run_id,
-                    browser_type=browser_type_name,
+                    browser_type=effective_playwright_browser_type(),
                     state=BrowserLifecycleState.READY.value,
                 )
 
@@ -371,7 +399,7 @@ class BrowserManager:
         Creates an isolated browser context for a workflow step or search.
         Enforces worker context limits, tracks session health, and guarantees timeout-bounded cleanup.
         """
-        async with self._get_isolated_context_lock():
+        async with self._get_isolated_context_semaphore():
             async with self._new_isolated_context_locked(
                 viewport_width=viewport_width,
                 viewport_height=viewport_height,
@@ -465,6 +493,8 @@ class BrowserManager:
             self._total_pages_created += 1
             self._current_workflow_run_id = effective_wf_id
             self._live_capture_page = page
+            if effective_wf_id:
+                self._live_pages_by_run[str(effective_wf_id)] = page
 
             if effective_wf_id:
                 from app.services.browser_live_view import start_live_capture
@@ -478,7 +508,7 @@ class BrowserManager:
                 await self._session_service.register_session(
                     session_id=session_id,
                     workflow_run_id=effective_wf_id,
-                    browser_type=getattr(settings, "PLAYWRIGHT_BROWSER", "chromium"),
+                    browser_type=effective_playwright_browser_type(),
                     state=BrowserLifecycleState.BUSY.value,
                 )
             except Exception as reg_err:
@@ -505,6 +535,8 @@ class BrowserManager:
                 from app.services.browser_live_view import stop_live_capture
 
                 await stop_live_capture(str(effective_wf_id), page)
+            if effective_wf_id:
+                self._live_pages_by_run.pop(str(effective_wf_id), None)
             self._live_capture_page = None
             self._current_workflow_run_id = None
 
@@ -548,22 +580,6 @@ class BrowserManager:
                         state=BrowserLifecycleState.READY.value,
                     )
 
-    @property
-    def current_session_id(self) -> str | None:
-        return self._current_session_id
-
-    @property
-    def is_visible_mode(self) -> bool:
-        """Determines if the browser is configured to launch with a visible GUI window."""
-        return (
-            getattr(settings, "PLAYWRIGHT_BROWSER_MODE", "headless") == "local_visible"
-            or not getattr(settings, "PLAYWRIGHT_HEADLESS", True)
-        )
-
-    def check_display_available(self) -> tuple[bool, str | None]:
-        """Checks if a graphical desktop display is available for visible browser execution."""
-        return check_display_available()
-
     async def log_session_activity(
         self,
         action: str,
@@ -574,6 +590,7 @@ class BrowserManager:
         url: str | None = None,
         error: str | None = None,
         duration_ms: int = 0,
+        workflow_run_id: uuid.UUID | str | None = None,
     ) -> None:
         """Records an execution step or milestone in the browser session's activity log."""
         if self._current_session_id:
@@ -588,17 +605,15 @@ class BrowserManager:
                 error=error,
                 duration_ms=duration_ms,
             )
-        if (
-            self._live_capture_page
-            and self._current_workflow_run_id
-            and getattr(settings, "BROWSER_LIVE_VIEW_ENABLED", True)
-        ):
+        run_key = str(workflow_run_id or self._current_workflow_run_id or "")
+        live_page = self._live_pages_by_run.get(run_key) if run_key else None
+        if live_page is None:
+            live_page = self._live_capture_page
+        if live_page and run_key and getattr(settings, "BROWSER_LIVE_VIEW_ENABLED", True):
             from app.services.browser_live_view import capture_frame_from_page
 
             try:
-                asyncio.create_task(
-                    capture_frame_from_page(self._live_capture_page, str(self._current_workflow_run_id))
-                )
+                asyncio.create_task(capture_frame_from_page(live_page, run_key))
             except Exception:
                 pass
 

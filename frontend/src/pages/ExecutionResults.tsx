@@ -903,12 +903,12 @@ export default function ExecutionResults() {
         if (!liveFrameObjectUrlRef.current) {
           setLiveFrameError(
             runIsTerminal
-              ? "No Chromium viewport was captured for this run."
-              : "Waiting for the live Chromium session to publish frames…"
+              ? "No Chrome viewport was captured for this run."
+              : "Waiting for the live Chrome session to publish frames…"
           );
         }
       } else {
-        setLiveFrameError("Unable to load the live Chromium browser view.");
+        setLiveFrameError("Unable to load the live Chrome browser view.");
       }
     } finally {
       setLiveFrameLoading(false);
@@ -1438,7 +1438,7 @@ export default function ExecutionResults() {
             }`}
           >
             <Monitor className="w-3.5 h-3.5" />
-            Live Chromium Browser
+            Live Chrome Browser
             {!isTerminal && (
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             )}
@@ -1782,7 +1782,7 @@ export default function ExecutionResults() {
           </Card>
         )}
 
-        {/* Tab: Live Chromium Browser (viewport stream) */}
+        {/* Tab: Live Chrome Browser (viewport stream) */}
         {activeTab === "live-chromium" && (
           <Card>
             <CardContent className="p-5 space-y-4">
@@ -1830,10 +1830,10 @@ export default function ExecutionResults() {
                   <div className="flex items-center gap-2">
                     <Monitor className="w-4 h-4 text-blue-600" />
                     <span className="font-semibold text-xs text-slate-900">
-                      Playwright Chromium — in-app live viewport
+                      Google Chrome — in-app live viewport
                     </span>
                     <span className="text-[10px] text-muted-foreground hidden sm:inline">
-                      (no separate desktop browser window)
+                      (worker also opens a visible Google Chrome window)
                     </span>
                     {browserActivity?.browser_state && (
                       <Badge
@@ -1911,7 +1911,7 @@ export default function ExecutionResults() {
                   <img
                     ref={liveImageRef}
                     src={liveFrameSrc}
-                    alt="Live Chromium browser viewport"
+                    alt="Live Chrome browser viewport"
                     className={`w-full h-auto max-h-[70vh] object-contain bg-white select-none ${
                       liveInteractEnabled ? "cursor-crosshair" : "cursor-default"
                     }`}
@@ -1934,7 +1934,7 @@ export default function ExecutionResults() {
                     )}
                     <p className="text-xs text-slate-400 max-w-md mx-auto">
                       {liveFrameError ||
-                        "The live Chromium window will appear here while Playwright automation runs."}
+                        "The live Chrome window will appear here while Playwright automation runs."}
                     </p>
                   </div>
                 )}

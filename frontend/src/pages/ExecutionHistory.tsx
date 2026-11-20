@@ -119,6 +119,7 @@ export default function ExecutionHistory() {
           </h2>
           <p className="text-sm text-muted-foreground mt-1">
             Monitor Celery background executions, branch outcomes, fault tolerance, and duration.
+            Up to two workflows can run at once when the worker uses thread concurrency 2.
           </p>
         </div>
         <div className="flex items-center gap-2">
