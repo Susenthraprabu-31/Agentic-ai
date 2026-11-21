@@ -264,39 +264,6 @@ Or run `backend\start_celery.ps1`, which uses the same settings.
 
 ---
 
-### Miami-Dade tax browser (Cloudflare)
-
-Headless workers on EC2 cannot pass Cloudflare interactively. Create a **custom tax browser profile** on your Windows PC, then import cookies to the server.
-
-1. On your PC (Google Chrome installed):
-
-```powershell
-cd backend
-.\open_miami_dade_tax_browser.ps1
-```
-
-2. Complete Cloudflare in the Chrome window; wait until the tax **search** page appears. The helper writes:
-
-   - `backend/storage/browser_profiles/miami_dade_tax/` (persistent profile)
-   - `backend/auth.json` (cookies for workers)
-
-3. Deploy session to EC2:
-
-   - **Settings → Custom tax browser profile → Upload auth.json**, or
-   - `scp backend/auth.json ubuntu@<host>:~/Agentic-ai/backend/auth.json`
-
-4. Restart the worker:
-
-```bash
-docker compose restart celery_worker
-```
-
-5. Optional: edit [`backend/config/tax_browser_policy.json`](backend/config/tax_browser_policy.json) to change launch args, user agent, or viewport.
-
-**Docker compose:** `FRONTEND_PORT` must be a port number (e.g. `5173`), not an IP address.
-
----
-
 ## Database Migrations
 
 ### Create a Migration

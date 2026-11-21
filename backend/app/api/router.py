@@ -3,7 +3,6 @@
 from fastapi import APIRouter
 
 from app.api.v1.auth import router as auth_router
-from app.api.v1.browser_tools import router as browser_tools_router
 from app.api.v1.circuit_breakers import router as circuit_breakers_router
 from app.api.v1.county_sources import router as county_sources_router
 from app.api.v1.dashboard import router as dashboard_router
@@ -23,7 +22,6 @@ api_router = APIRouter(prefix=settings.API_V1_PREFIX)
 api_router.include_router(health_router)
 api_router.include_router(dashboard_router)
 api_router.include_router(auth_router)
-api_router.include_router(browser_tools_router)
 api_router.include_router(workflows_router)
 api_router.include_router(county_sources_router)
 api_router.include_router(recipe_templates_router)
