@@ -96,11 +96,92 @@ class LocalDocumentStorage(DocumentStorageBackend):
         return str(safe_path)
 
 
+class S3DocumentStorage(DocumentStorageBackend):
+    """AWS S3 document backend (sync boto3 calls in thread pool)."""
+
+    def __init__(self) -> None:
+        self._bucket = settings.S3_BUCKET_NAME
+        self._prefix = (settings.CUSTOMER_STORAGE_PREFIX or "default").strip("/")
+
+    def _full_key(self, storage_key: str) -> str:
+        clean = storage_key.strip().lstrip("/\\")
+        return f"{self._prefix}/{clean}"
+
+    def _client(self):
+        import boto3
+
+        kw: dict = {}
+        if settings.S3_ENDPOINT_URL:
+            kw["endpoint_url"] = settings.S3_ENDPOINT_URL
+        if settings.S3_ACCESS_KEY and settings.S3_SECRET_KEY:
+            kw["aws_access_key_id"] = settings.S3_ACCESS_KEY
+            kw["aws_secret_access_key"] = settings.S3_SECRET_KEY
+        return boto3.client("s3", **kw)
+
+    async def save_file(self, storage_key: str, data: bytes) -> str:
+        import asyncio
+
+        key = self._full_key(storage_key)
+        client = self._client()
+
+        def _upload() -> str:
+            client.put_object(Bucket=self._bucket, Key=key, Body=data, ContentType="application/pdf")
+            return f"s3://{self._bucket}/{key}"
+
+        uri = await asyncio.to_thread(_upload)
+        logger.info("Uploaded %d bytes to %s", len(data), uri)
+        return uri
+
+    async def get_file(self, storage_key: str) -> bytes | None:
+        import asyncio
+
+        key = self._full_key(storage_key)
+        client = self._client()
+
+        def _download() -> bytes | None:
+            try:
+                obj = client.get_object(Bucket=self._bucket, Key=key)
+                return obj["Body"].read()
+            except Exception:
+                return None
+
+        return await asyncio.to_thread(_download)
+
+    async def file_exists(self, storage_key: str) -> bool:
+        import asyncio
+
+        key = self._full_key(storage_key)
+        client = self._client()
+
+        def _head() -> bool:
+            try:
+                client.head_object(Bucket=self._bucket, Key=key)
+                return True
+            except Exception:
+                return False
+
+        return await asyncio.to_thread(_head)
+
+    async def promote_temp_file(self, temp_filepath: str, storage_key: str) -> str:
+        with open(temp_filepath, "rb") as f:
+            data = f.read()
+        return await self.save_file(storage_key, data)
+
+
+def resolve_document_storage_backend() -> DocumentStorageBackend:
+    backend = (settings.DOCUMENT_STORAGE_BACKEND or "local").lower().strip()
+    if backend == "s3":
+        return S3DocumentStorage()
+    if backend == "composite":
+        return LocalDocumentStorage()
+    return LocalDocumentStorage()
+
+
 class DocumentStorage:
     """High-level document storage manager coordinating keys, backend, and persistence."""
 
     def __init__(self, backend: DocumentStorageBackend | None = None) -> None:
-        self.backend = backend or LocalDocumentStorage()
+        self.backend = backend or resolve_document_storage_backend()
 
     @staticmethod
     def generate_storage_key(

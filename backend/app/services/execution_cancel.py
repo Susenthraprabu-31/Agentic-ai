@@ -32,6 +32,8 @@ def _cancel_key(run_id: str) -> str:
 
 
 async def _redis() -> Any | None:
+    if not settings.USE_REDIS:
+        return None
     global _redis_client, _redis_loop
     try:
         import asyncio
@@ -59,6 +61,10 @@ async def _redis() -> Any | None:
 
 
 async def signal_cancel(run_id: str | uuid.UUID) -> None:
+    from app.workers.inprocess_ipc import set_cancel_flag, use_inprocess_ipc
+
+    if use_inprocess_ipc():
+        await set_cancel_flag(str(run_id))
     client = await _redis()
     if not client:
         return
@@ -69,6 +75,10 @@ async def signal_cancel(run_id: str | uuid.UUID) -> None:
 
 
 async def is_cancel_signalled(run_id: str | uuid.UUID) -> bool:
+    from app.workers.inprocess_ipc import is_cancel_flag_set, use_inprocess_ipc
+
+    if use_inprocess_ipc() and await is_cancel_flag_set(str(run_id)):
+        return True
     client = await _redis()
     if not client:
         return False

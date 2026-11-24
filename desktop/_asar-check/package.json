@@ -1,0 +1,7 @@
+{
+  "name": "title-search-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Title Search Platform — Windows desktop application",
+  "main": "electron/main.cjs"
+}

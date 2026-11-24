@@ -57,6 +57,7 @@ def recover_orphaned_workflows() -> dict[str, Any]:
 
     async def _run() -> dict[str, Any]:
         recovery = RecoveryService()
+        stuck_finalized = await recovery.finalize_completed_runs_stuck_in_progress()
         orphaned = await recovery.detect_orphaned_runs()
         recovered_count = 0
         failed_count = 0
@@ -74,6 +75,7 @@ def recover_orphaned_workflows() -> dict[str, Any]:
             details.append({"run_id": str(run.id), "success": success, "message": msg})
 
         return {
+            "stuck_finalized": stuck_finalized,
             "detected_orphaned": len(orphaned),
             "recovered": recovered_count,
             "failed_or_terminal": failed_count,

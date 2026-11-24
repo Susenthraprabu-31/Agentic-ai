@@ -6,6 +6,7 @@ import uuid
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -59,6 +60,19 @@ class RecoveryService:
                     w_res = await session.execute(worker_stmt)
                     worker = w_res.scalar_one_or_none()
 
+                    if worker:
+                        wh = worker.last_heartbeat_at
+                        if wh and wh.tzinfo is None:
+                            wh = wh.replace(tzinfo=timezone.utc)
+                        worker_alive = bool(wh and wh >= cutoff)
+                        busy_on_this_run = (
+                            worker.status == WorkerStatus.BUSY.value
+                            and (worker.current_task_id or "") == str(run.id)
+                            and worker_alive
+                        )
+                        if busy_on_this_run:
+                            continue
+
                     if not worker or worker.status in [WorkerStatus.UNRESPONSIVE.value, WorkerStatus.OFFLINE.value]:
                         is_orphan = True
                 else:
@@ -81,6 +95,49 @@ class RecoveryService:
                     orphaned.append(run)
 
             return orphaned
+        finally:
+            if not self.db:
+                await session.close()
+
+    async def finalize_completed_runs_stuck_in_progress(self) -> int:
+        """
+        Mark RUNNING/RECOVERING runs as COMPLETED when every node finished but finalization was fenced out.
+        """
+        session = self.db or AsyncSessionLocal()
+        finalized = 0
+        try:
+            stmt = (
+                select(WorkflowRun)
+                .where(WorkflowRun.status.in_([RunStatus.RUNNING.value, RunStatus.RECOVERING.value]))
+                .options(selectinload(WorkflowRun.node_runs))
+            )
+            res = await session.execute(stmt)
+            runs = res.scalars().all()
+            now = datetime.now(timezone.utc)
+
+            for run in runs:
+                node_runs = list(run.node_runs or [])
+                if not node_runs:
+                    continue
+                if not all((nr.status or "").upper() == "COMPLETED" for nr in node_runs):
+                    continue
+                run.status = RunStatus.COMPLETED.value
+                run.completed_at = now
+                if run.started_at and not run.duration_ms:
+                    started = run.started_at
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    run.duration_ms = max(1, int((now - started).total_seconds() * 1000))
+                finalized += 1
+                logger.info(
+                    "Finalized stuck WorkflowRun %s → COMPLETED (all %d node(s) already completed)",
+                    run.id,
+                    len(node_runs),
+                )
+
+            if finalized:
+                await session.commit()
+            return finalized
         finally:
             if not self.db:
                 await session.close()

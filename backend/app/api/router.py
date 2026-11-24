@@ -13,6 +13,7 @@ from app.api.v1.recipe_templates import router as recipe_templates_router
 from app.api.v1.recipes import router as recipes_router
 from app.api.v1.results import router as results_router
 from app.api.v1.security_events import router as security_events_router
+from app.api.v1.settings_desktop import router as settings_desktop_router
 from app.api.v1.workers import router as workers_router
 from app.api.v1.workflows import router as workflows_router
 from app.core.config import settings
@@ -32,3 +33,4 @@ api_router.include_router(results_router)
 api_router.include_router(security_events_router)
 api_router.include_router(workers_router)
 api_router.include_router(circuit_breakers_router)
+api_router.include_router(settings_desktop_router)

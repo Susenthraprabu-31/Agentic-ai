@@ -20,11 +20,15 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 # Each task runs in its own asyncio.run() event loop. NullPool prevents connections
 # created in one event loop from being reused across loops, avoiding asyncpg socket
 # errors ("AttributeError: 'NoneType' object has no attribute 'send'").
-worker_engine: AsyncEngine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DATABASE_ECHO,
-    poolclass=NullPool,
-)
+def _worker_engine_kwargs() -> dict:
+    url = settings.DATABASE_URL
+    kw: dict = {"echo": settings.DATABASE_ECHO, "poolclass": NullPool}
+    if url.startswith("sqlite"):
+        kw["connect_args"] = {"check_same_thread": False}
+    return kw
+
+
+worker_engine: AsyncEngine = create_async_engine(settings.DATABASE_URL, **_worker_engine_kwargs())
 
 WorkerAsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=worker_engine,

@@ -94,7 +94,7 @@ class MistralWebpageOCRService:
                 scroll_property_detail_page,
             )
 
-            await expand_collapsible_detail_sections(page)
+            await expand_collapsible_detail_sections(page, query_value=query_value)
             if scroll_first and not is_gis_portal_url(page.url or ""):
                 try:
                     await scroll_property_detail_page(page)

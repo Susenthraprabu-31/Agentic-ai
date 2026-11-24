@@ -74,7 +74,7 @@ function runStatusBadge(status: string) {
       );
     case "QUEUED":
     case "PENDING":
-      return <Badge className="bg-amber-500 text-white font-medium">Queued in Celery</Badge>;
+      return <Badge className="bg-amber-500 text-white font-medium">Queued</Badge>;
     case "CANCEL_REQUESTED":
       return <Badge className="bg-slate-500 text-white font-medium">Cancelling...</Badge>;
     case "CANCELLED":
@@ -872,7 +872,7 @@ export default function ExecutionResults() {
       }
     } catch {
       setErrorMsg(
-        "Click could not reach the worker — restart Celery, confirm Redis matches API, and keep the run BUSY."
+        "Click could not reach the browser session — ensure the run is active and the desktop backend is running."
       );
     } finally {
       setLiveClickSending(false);
@@ -1224,7 +1224,7 @@ export default function ExecutionResults() {
               {run && runStatusBadge(run.status)}
               {run?.celery_task_id && (
                 <span className="text-[10px] font-mono text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
-                  Celery: {run.celery_task_id.slice(0, 8)}
+                  Job: {run.celery_task_id.slice(0, 12)}
                 </span>
               )}
             </div>

@@ -769,10 +769,18 @@ async def ensure_tax_account_detail_loaded(page: Page, query_value: str = "") ->
     from app.browser.modal_detector import dismiss_blocking_overlays_heuristic
 
     await dismiss_blocking_overlays_heuristic(page)
+    if await page_shows_visualgov_tax_search_listing(page, query_value):
+        logger.info(
+            "On multi-year tax search listing for %s; not opening a single bill row.",
+            (query_value or "")[:40],
+        )
+        return False
     if await page_shows_tax_account_summary(page, query_value):
         return True
 
     body_l = (await _aggregate_visible_body_text(page)).lower()
+    if body_shows_visualgov_tax_year_table(body_l, query_value):
+        return False
     if "records found" in body_l or "showing records" in body_l:
         try:
             from app.browser.result_selector_ai import detect_and_click_result_link_ai
@@ -1097,6 +1105,133 @@ def _plausible_tax_bill_year(year: str) -> bool:
     return 1990 <= y <= current + 1
 
 
+def tax_search_results_same_document_state(url: str) -> bool:
+    """
+    True when results render on the same URL as search (AJAX/postback).
+    A full page.goto() here clears the year table — stay on the live document.
+    """
+    u = (url or "").lower()
+    return any(
+        k in u
+        for k in (
+            "searchselect",
+            "/property/search",
+            "property/searchselect",
+        )
+    )
+
+
+async def body_shows_tax_search_form_without_results(page: Page) -> bool:
+    """Empty VisualGov search form vs. the post-search year link grid."""
+    try:
+        body = await _aggregate_visible_body_text(page)
+    except Exception:
+        return False
+    bl = body.lower()
+    if "click the property number below" in bl or "records found" in bl:
+        return False
+    if body_shows_visualgov_tax_year_table(body, ""):
+        return False
+    markers = (
+        "search for your property",
+        "use only one",
+        "hide filter options",
+        "search selection",
+    )
+    return any(m in bl for m in markers)
+
+
+async def scroll_tax_search_results_table_into_view(page: Page) -> None:
+    for frame in page.frames:
+        for sel in (
+            "text=/click the property number below/i",
+            "text=/records found/i",
+            "table tbody tr",
+        ):
+            try:
+                loc = frame.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                if await loc.is_visible(timeout=1500):
+                    await loc.scroll_into_view_if_needed(timeout=4000)
+                    return
+            except Exception:
+                continue
+
+
+async def ensure_tax_search_results_listing_visible(
+    page: Page,
+    parcel_id: str,
+    *,
+    search_input_selector: str | None = None,
+    search_submit_selector: str | None = None,
+    portal_search_url: str | None = None,
+    min_links: int = 2,
+    timeout_s: float = 14.0,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Wait for year links on the current page; re-submit search if SPA state was lost."""
+    import time as _time
+
+    deadline = _time.time() + timeout_s
+    last_links: list[dict[str, Any]] = []
+    refreshed = False
+
+    while _time.time() < deadline:
+        discovery = await discover_tax_search_result_links(page, parcel_id)
+        last_links = _filter_tax_search_result_links(discovery.get("links") or [], parcel_id)
+        if len(last_links) >= min_links:
+            await scroll_tax_search_results_table_into_view(page)
+            return True, last_links
+        if await page_shows_visualgov_tax_search_listing(page, parcel_id):
+            discovery = await discover_tax_search_result_links(page, parcel_id)
+            last_links = _filter_tax_search_result_links(discovery.get("links") or [], parcel_id)
+            if len(last_links) >= min_links:
+                await scroll_tax_search_results_table_into_view(page)
+                return True, last_links
+
+        if not refreshed and await body_shows_tax_search_form_without_results(page):
+            refreshed = True
+            ok = await refresh_tax_search_results_for_query(
+                page,
+                parcel_id,
+                input_selector=search_input_selector,
+                submit_selector=search_submit_selector,
+                portal_search_url=portal_search_url,
+            )
+            if ok:
+                await page.wait_for_timeout(1200)
+                continue
+
+        await page.wait_for_timeout(650)
+
+    return len(last_links) >= min_links, last_links
+
+
+def sanitize_tax_results_list_url(url: str) -> str:
+    """Drop retry-search hash junk (#true#0) so returning to the multi-year list does not 404."""
+    u = (url or "").strip()
+    if not u:
+        return u
+    u = re.sub(r"#(?:true|false)(?:#\d+)+\s*$", "", u, flags=re.I)
+    u = re.sub(r"#\d+\s*$", "", u)
+    return u.rstrip("?#") or u
+
+
+def _dedupe_tax_search_targets_by_year(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per tax year (newest duplicates win) for last-N bill capture."""
+    by_year: dict[str, dict[str, Any]] = {}
+    for t in sorted(
+        targets,
+        key=lambda x: int(x["year"]) if str(x.get("year") or "").isdigit() else 0,
+        reverse=True,
+    ):
+        y = str(t.get("year") or "").strip()
+        if not y.isdigit() or len(y) != 4:
+            continue
+        by_year.setdefault(y, t)
+    return [by_year[y] for y in sorted(by_year.keys(), key=int, reverse=True)]
+
+
 def tax_search_result_link_matches_query(link_text: str, query_value: str) -> bool:
     """True when a VisualGov-style bill row belongs to the searched property (not bulk county hits)."""
     if not link_text or not query_value:
@@ -1151,33 +1286,48 @@ TAX_SEARCH_RESULT_LINKS_JS = r"""
     body.includes('records found') ||
     body.includes('view or pay a tax bill') ||
     body.includes('click the property number below') ||
-    body.includes('total') && body.includes('property number');
+    (body.includes('total') && body.includes('property number'));
   const links = [];
-  const scopes = document.querySelectorAll('table tbody tr a, table a, main a, #content a, a[href]');
+  const scopes = document.querySelectorAll(
+    'table tbody tr a, table td a, table tr a, table a, main a, #content a, a[href*="javascript"], a[href]'
+  );
   scopes.forEach((a) => {
     try {
       if (!isVisible(a)) return;
       if (a.closest('nav, header, footer, .navbar, [role="navigation"]')) return;
+      const row = a.closest('tr');
+      const rowText = row
+        ? (row.innerText || row.textContent || '').replace(/\s+/g, ' ').trim()
+        : '';
       const t = (a.innerText || a.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!t || t.length < 8 || t.length > 200) return;
-      if (/^(search|previous|next|home|menu|cart|privacy)$/i.test(t)) return;
-      const ym = t.match(/(20\d{2})\s*$/);
-      const year = ym ? ym[1] : '';
-      if (!queryMatchesLink(q, t)) return;
-      if (!year && t.replace(/\D/g, '').length < 8) return;
+      const blob = (rowText && rowText.length >= t.length ? rowText : t) || t;
+      if (!blob || blob.length < 8 || blob.length > 280) return;
+      if (/^(search|previous|next|home|menu|cart|privacy)$/i.test(blob)) return;
+      const years = blob.match(/\b(20\d{2})\b/g) || [];
+      const year = years.length ? years[years.length - 1] : '';
+      if (!queryMatchesLink(q, blob) && !queryMatchesLink(q, t)) return;
+      if (!year && blob.replace(/\D/g, '').length < 8) return;
+      const label = t.length >= 8 ? t : blob;
+      const href = a.getAttribute('href') || '';
       links.push({
-        text: t,
+        text: label,
         year: year,
-        href: a.getAttribute('href') || '',
-        selector: `a:has-text("${esc(t)}")`,
+        href: href,
+        selector: href
+          ? `a[href="${esc(href)}"]`
+          : `a:has-text("${esc(label)}")`,
       });
     } catch (_) {}
   });
   const seen = new Set();
+  const seenYear = new Set();
   const uniq = [];
   for (const l of links) {
+    const yr = l.year || '';
+    if (yr && seenYear.has(yr)) continue;
     if (seen.has(l.text)) continue;
     seen.add(l.text);
+    if (yr) seenYear.add(yr);
     uniq.push(l);
   }
   uniq.sort((a, b) => (parseInt(b.year, 10) || 0) - (parseInt(a.year, 10) || 0));
@@ -1192,6 +1342,66 @@ def _filter_tax_search_result_links(links: list[dict[str, Any]], query_value: st
         for l in links or []
         if tax_search_result_link_matches_query(str(l.get("text") or ""), query_value)
     ]
+
+
+def body_shows_visualgov_tax_year_table(body: str, query_value: str) -> bool:
+    """Washington / VisualGov post-search table with one link per tax year."""
+    text = (body or "").lower()
+    if not text:
+        return False
+    markers = (
+        "view or pay a tax bill",
+        "click the property number below",
+        "search selection",
+        "records found",
+    )
+    if not any(m in text for m in markers):
+        return False
+    years = set(re.findall(r"\b(20\d{2})\b", body or ""))
+    if len(years) < 2:
+        return False
+    q_digits = re.sub(r"\D", "", query_value or "")
+    if q_digits and len(q_digits) >= 8 and q_digits in re.sub(r"\D", "", body or ""):
+        return True
+    q = (query_value or "").strip()
+    return bool(q and q.lower() in text)
+
+
+async def page_shows_visualgov_tax_search_listing(page: Page, query_value: str = "") -> bool:
+    """True when the portal shows the multi-year property-number link grid (not a single bill)."""
+    try:
+        body = await _aggregate_visible_body_text(page)
+    except Exception:
+        body = ""
+    if body_shows_visualgov_tax_year_table(body, query_value):
+        return True
+    discovery = await discover_tax_search_result_links(page, query_value)
+    links = discovery.get("links") or []
+    return bool(discovery.get("listing") and len(links) >= 2)
+
+
+async def wait_for_tax_search_results_listing(
+    page: Page, query_value: str, *, timeout_s: float = 16.0
+) -> dict[str, Any]:
+    """Wait for VisualGov multi-year results after submit (table may render late)."""
+    import time as _time
+
+    deadline = _time.time() + timeout_s
+    best: dict[str, Any] = {"ready": False, "listing": False, "link_count": 0, "results_url": page.url or ""}
+    while _time.time() < deadline:
+        if await page_shows_visualgov_tax_search_listing(page, query_value):
+            discovery = await discover_tax_search_result_links(page, query_value)
+            count = len(discovery.get("links") or [])
+            best = {
+                "ready": True,
+                "listing": bool(discovery.get("listing") or count >= 2),
+                "link_count": count,
+                "results_url": sanitize_tax_results_list_url(page.url or ""),
+            }
+            if count >= 2:
+                return best
+        await page.wait_for_timeout(700)
+    return best
 
 
 async def discover_tax_search_result_links(page: Page, query_value: str) -> dict[str, Any]:
@@ -1232,6 +1442,149 @@ def _pick_tax_link_for_year(
     return None
 
 
+async def _open_tax_search_result_link(page: Page, link: dict[str, Any], parcel_id: str = "") -> bool:
+    """Open a VisualGov-style search-row bill link (href navigation preferred)."""
+    from urllib.parse import urljoin
+
+    href = (link.get("href") or "").strip()
+    text = (link.get("text") or "").strip()
+    year = str(link.get("year") or "").strip()
+    sel = (link.get("selector") or "").strip()
+    parcel_digits = re.sub(r"\D", "", parcel_id or "")
+
+    junk_href = {"", "#", "javascript:void(0)", "javascript:;", "javascript:void(0);"}
+    is_js_href = href.lower().startswith("javascript:")
+
+    if sel and (is_js_href or not href or href.lower() in junk_href):
+        for frame in page.frames:
+            try:
+                loc = frame.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                if not await loc.is_visible(timeout=2800):
+                    continue
+                await loc.scroll_into_view_if_needed(timeout=3000)
+                await loc.click(timeout=7000)
+                await page.wait_for_timeout(1200)
+                return True
+            except Exception:
+                continue
+
+    if year and parcel_digits:
+        pattern = re.compile(
+            rf"R\s*-\s*[\d\-]+\s*-\s*{re.escape(year)}\b",
+            re.I,
+        )
+        for frame in page.frames:
+            try:
+                loc = frame.get_by_role("link", name=pattern).first
+                if await loc.count() > 0 and await loc.is_visible(timeout=2000):
+                    await loc.scroll_into_view_if_needed(timeout=3000)
+                    await loc.click(timeout=7000)
+                    await page.wait_for_timeout(1200)
+                    return True
+            except Exception:
+                continue
+
+    if href.lower() not in junk_href and not is_js_href:
+        try:
+            dest = urljoin(page.url, href)
+            await page.goto(dest, wait_until="domcontentloaded", timeout=24000)
+            await page.wait_for_timeout(1000)
+            return True
+        except Exception as nav_err:
+            logger.debug("Tax search row href open failed (%s): %s", href[:96], nav_err)
+
+    if sel:
+        for frame in page.frames:
+            try:
+                loc = frame.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                if not await loc.is_visible(timeout=2800):
+                    continue
+                await loc.scroll_into_view_if_needed(timeout=3000)
+                await loc.click(timeout=7000)
+                await page.wait_for_timeout(900)
+                return True
+            except Exception:
+                continue
+
+    if year or text:
+        for frame in page.frames:
+            try:
+                candidates = frame.locator("a")
+                count = await candidates.count()
+                for i in range(min(count, 280)):
+                    el = candidates.nth(i)
+                    try:
+                        if not await el.is_visible(timeout=400):
+                            continue
+                        blob = (await el.inner_text(timeout=1500) or "").replace("\n", " ").strip()
+                        blob_digits = re.sub(r"\D", "", blob)
+                        if year and year not in blob:
+                            continue
+                        if parcel_digits and len(parcel_digits) >= 10 and parcel_digits not in blob_digits:
+                            continue
+                        if text and text not in blob and not tax_search_result_link_matches_query(blob, parcel_id):
+                            continue
+                        await el.click(timeout=7000)
+                        await page.wait_for_timeout(900)
+                        return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    return False
+
+
+async def capture_tax_search_results_index_screenshot(
+    page: Page,
+    parcel_id: str,
+    *,
+    years_listed: list[str] | None = None,
+    search_input_selector: str | None = None,
+    search_submit_selector: str | None = None,
+    portal_search_url: str | None = None,
+) -> dict[str, Any] | None:
+    """Screenshot the multi-year search results table (index) without opening each bill year."""
+    clean_id = _clean_storage_key(parcel_id)
+    dest_dir = get_tax_storage_dir(clean_id)
+    try:
+        ready, _ = await ensure_tax_search_results_listing_visible(
+            page,
+            parcel_id,
+            search_input_selector=search_input_selector,
+            search_submit_selector=search_submit_selector,
+            portal_search_url=portal_search_url,
+            min_links=2,
+            timeout_s=12.0,
+        )
+        if not ready:
+            logger.warning(
+                "Tax search results index: year link table not visible for %s (refusing blank search form shot).",
+                parcel_id,
+            )
+            return None
+        await scroll_tax_search_results_table_into_view(page)
+        await page.wait_for_timeout(400)
+        index_path = dest_dir / f"tax_search_results_index_{clean_id}.png"
+        await page.screenshot(path=str(index_path), full_page=True)
+        if index_path.exists() and index_path.stat().st_size > 2500:
+            return {
+                "document_type": "Tax Search Results Index",
+                "document_title": f"Tax Search Results Index - {clean_id}.png",
+                "file_path": str(index_path),
+                "source_url": page.url,
+                "document_url": page.url,
+                "capture_kind": "search_results_index",
+                "years_listed": years_listed or [],
+            }
+    except Exception as exc:
+        logger.warning("Could not capture tax search results index screenshot: %s", exc)
+    return None
+
+
 async def capture_all_tax_search_result_records(
     page: Page,
     parcel_id: str,
@@ -1241,14 +1594,34 @@ async def capture_all_tax_search_result_records(
     search_input_selector: str | None = None,
     search_submit_selector: str | None = None,
     workflow_run_id: str = "",
+    recent_year_count: int = 2,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
-    Open each tax search result link (one per bill year), capture screenshot/PDF/extract,
-    then re-run the portal search before the next year (avoids stale bulk result lists).
+    Screenshot the search-results index, then open only the most recent bill-year links
+    (default: 2), capture each detail view, and refresh search between years.
     """
-    discovery = await discover_tax_search_result_links(page, parcel_id)
-    links = _filter_tax_search_result_links(discovery.get("links") or [], parcel_id)
-    if len(links) < 2 and not (discovery.get("listing") and len(links) == 1):
+    from app.core.config import settings
+
+    recent_n = int(
+        getattr(settings, "TAX_RECENT_YEAR_SCREENSHOT_COUNT", recent_year_count) or recent_year_count
+    )
+    portal_url = sanitize_tax_results_list_url(portal_search_url or results_list_url or page.url or "")
+    list_url = sanitize_tax_results_list_url(results_list_url or page.url or "")
+    same_doc = tax_search_results_same_document_state(list_url or page.url or "")
+
+    ready, links = await ensure_tax_search_results_listing_visible(
+        page,
+        parcel_id,
+        search_input_selector=search_input_selector,
+        search_submit_selector=search_submit_selector,
+        portal_search_url=portal_url,
+        min_links=2,
+        timeout_s=16.0,
+    )
+    if len(links) < 2:
+        discovery = await discover_tax_search_result_links(page, parcel_id)
+        links = _filter_tax_search_result_links(discovery.get("links") or [], parcel_id)
+    if len(links) < 2 and not (ready and len(links) == 1):
         if not links:
             logger.warning(
                 "No tax search result links match query %s; refusing bulk/unrelated rows.",
@@ -1256,27 +1629,89 @@ async def capture_all_tax_search_result_records(
             )
         return [], {}
 
-    logger.info(
-        "Tax search multi-year capture: %d link(s) matching %s",
-        len(links),
-        parcel_id,
-    )
-
-    portal_url = (portal_search_url or results_list_url or page.url or "").strip()
-    targets = [
+    frozen_links = list(links)
+    all_targets = [
         {
             "year": str(l.get("year") or "").strip() or "unknown",
             "text": (l.get("text") or "").strip(),
+            "link": dict(l),
         }
-        for l in links
+        for l in frozen_links
     ]
+    indexed_years = _unique_tax_years_sorted_desc(
+        [t["year"] for t in all_targets if t.get("year") and t["year"] != "unknown"]
+    )
 
     docs: list[dict[str, Any]] = []
+    if list_url and not same_doc:
+        try:
+            await page.goto(list_url, wait_until="domcontentloaded", timeout=22000)
+            await page.wait_for_timeout(800)
+            await ensure_tax_search_results_listing_visible(
+                page,
+                parcel_id,
+                search_input_selector=search_input_selector,
+                search_submit_selector=search_submit_selector,
+                portal_search_url=portal_url,
+                min_links=2,
+                timeout_s=14.0,
+            )
+        except Exception:
+            pass
+    index_doc = await capture_tax_search_results_index_screenshot(
+        page,
+        parcel_id,
+        years_listed=indexed_years,
+        search_input_selector=search_input_selector,
+        search_submit_selector=search_submit_selector,
+        portal_search_url=portal_url,
+    )
+    if index_doc:
+        docs.append(index_doc)
+
+    deduped = _dedupe_tax_search_targets_by_year(all_targets)
+    targets = deduped[: max(1, recent_n)]
+    skipped = [t["year"] for t in deduped if t not in targets]
+
+    logger.info(
+        "Tax search capture: %d total year link(s) for %s; opening %d most recent (%s); skipping %s",
+        len(all_targets),
+        parcel_id,
+        len(targets),
+        ", ".join(t["year"] for t in targets),
+        ", ".join(skipped[:8]) + ("…" if len(skipped) > 8 else "") if skipped else "none",
+    )
+
     records_by_year: dict[str, Any] = {}
     captured_years: list[str] = []
 
     for idx, target in enumerate(targets):
         year = target["year"]
+        if list_url and not same_doc:
+            try:
+                await page.goto(list_url, wait_until="domcontentloaded", timeout=22000)
+                await page.wait_for_timeout(650)
+                await ensure_tax_search_results_listing_visible(
+                    page,
+                    parcel_id,
+                    search_input_selector=search_input_selector,
+                    search_submit_selector=search_submit_selector,
+                    portal_search_url=portal_url,
+                    min_links=2,
+                    timeout_s=12.0,
+                )
+            except Exception:
+                pass
+        elif same_doc and idx > 0:
+            await ensure_tax_search_results_listing_visible(
+                page,
+                parcel_id,
+                search_input_selector=search_input_selector,
+                search_submit_selector=search_submit_selector,
+                portal_search_url=portal_url,
+                min_links=2,
+                timeout_s=10.0,
+            )
         if idx > 0:
             try:
                 await page.go_back(wait_until="domcontentloaded", timeout=18000)
@@ -1294,29 +1729,21 @@ async def capture_all_tax_search_result_records(
                 logger.warning("Skipping tax year %s; could not refresh search for %s", year, parcel_id)
                 continue
 
-        discovery_now = await discover_tax_search_result_links(page, parcel_id)
-        live_links = _filter_tax_search_result_links(discovery_now.get("links") or [], parcel_id)
-        link = _pick_tax_link_for_year(
-            live_links, year=year, link_text=target["text"], parcel_id=parcel_id
-        )
+        link: dict[str, Any] | None = None
+        frozen = target.get("link")
+        if isinstance(frozen, dict) and str(frozen.get("year") or "").strip() == year:
+            link = frozen
+        if not link:
+            discovery_now = await discover_tax_search_result_links(page, parcel_id)
+            live_links = _filter_tax_search_result_links(discovery_now.get("links") or [], parcel_id)
+            link = _pick_tax_link_for_year(
+                live_links, year=year, link_text=target["text"], parcel_id=parcel_id
+            )
         if not link:
             logger.warning("No live link for tax year %s (%s)", year, target["text"][:80])
             continue
 
-        sel = (link.get("selector") or "").strip()
-        if not sel:
-            continue
-        opened = False
-        for frame in page.frames:
-            try:
-                loc = frame.locator(sel).first
-                if await loc.count() == 0 or not await loc.is_visible(timeout=2500):
-                    continue
-                await loc.click(timeout=6000)
-                opened = True
-                break
-            except Exception:
-                continue
+        opened = await _open_tax_search_result_link(page, link, parcel_id)
         if not opened:
             logger.warning("Could not open tax search result link: %s", link.get("text"))
             continue
@@ -1346,6 +1773,9 @@ async def capture_all_tax_search_result_records(
         "tax_search_results_years": captured_years,
         "tax_search_results_by_year": records_by_year,
         "tax_search_results_count": len(captured_years),
+        "tax_years_indexed": indexed_years,
+        "tax_years_skipped": skipped,
+        "tax_recent_year_capture_limit": recent_n,
     }
     return docs, meta
 
@@ -1682,6 +2112,13 @@ async def capture_tax_collector_document_suite(
     Full tax capture: account summary, bill history index, all indexed years,
     and explicit recent-year screenshots.
     """
+    if await page_shows_visualgov_tax_search_listing(page, parcel_id):
+        logger.warning(
+            "Tax document suite skipped on multi-year search listing for %s; use search-results capture.",
+            parcel_id,
+        )
+        return [], {}
+
     docs: list[dict[str, Any]] = []
 
     await ensure_tax_account_detail_loaded(page, parcel_id)

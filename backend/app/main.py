@@ -34,8 +34,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         name=settings.APP_NAME,
         version=settings.APP_VERSION,
         environment=settings.ENVIRONMENT,
+        desktop=settings.DESKTOP_MODE,
     )
+    if settings.DESKTOP_MODE:
+        from app.db.desktop_bootstrap import bootstrap_desktop_database
+        from app.services.credential_store import apply_stored_secrets_to_settings
+        from app.storage.storage_service import start_storage_sync_worker
+
+        apply_stored_secrets_to_settings()
+        await bootstrap_desktop_database()
+        await start_storage_sync_worker()
+    if settings.JOB_RUNNER_ENABLED:
+        from app.workers.job_runner import start_local_job_runner
+        from app.workers.scheduler import start_local_scheduler
+
+        await start_local_job_runner()
+        await start_local_scheduler()
     yield
+    if settings.JOB_RUNNER_ENABLED:
+        from app.workers.job_runner import stop_local_job_runner
+        from app.workers.scheduler import stop_local_scheduler
+
+        await stop_local_job_runner()
+        await stop_local_scheduler()
+    if settings.DESKTOP_MODE:
+        from app.storage.storage_service import stop_storage_sync_worker
+
+        await stop_storage_sync_worker()
     logger.info("app.shutdown", name=settings.APP_NAME)
 
 
@@ -67,6 +92,18 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    if settings.DESKTOP_MODE:
+
+        @application.middleware("http")
+        async def localhost_guard(request: Request, call_next):  # type: ignore[no-untyped-def]
+            host = (request.client.host if request.client else "") or ""
+            if host not in ("127.0.0.1", "::1", "localhost"):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Desktop API is only available on localhost", "code": "FORBIDDEN"},
+                )
+            return await call_next(request)
 
     # ------------------------------------------------------------------
     # Routers

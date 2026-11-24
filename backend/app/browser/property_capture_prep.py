@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from playwright.async_api import Page
 
@@ -135,15 +136,24 @@ _SUPPRESS_NATIVE_PRINT_INIT = """() => {
 }"""
 
 
+_PRINT_VIEW_PATH_RE = re.compile(
+    r"(?:^|/)(?:print(?:/|$)|print(?:building|property|parcel|card|details|report))",
+    re.I,
+)
+
+
 def is_print_route_url(url: str) -> bool:
     """True when URL is a printer-friendly view that normally calls window.print()."""
-    u = (url or "").lower()
-    return (
-        "/print" in u
-        or u.rstrip("/").endswith("/print")
-        or "print=1" in u
-        or "mode=print" in u
-    )
+    u = (url or "").strip()
+    if not u:
+        return False
+    low = u.lower()
+    if "print=1" in low or "mode=print" in low:
+        return True
+    path = urlparse(u).path.lower()
+    if path.rstrip("/").endswith("/print") or "/print/" in path:
+        return True
+    return bool(_PRINT_VIEW_PATH_RE.search(path))
 
 
 def _href_looks_like_print_route(href: str) -> bool:
@@ -157,10 +167,33 @@ def detail_url_from_print_route(url: str) -> str | None:
     """Turn a printer-friendly URL into the normal property detail URL."""
     if not url or not is_print_route_url(url):
         return None
-    base = (url or "").split("?")[0].split("#")[0]
+    parsed = urlparse(url)
+    path_low = (parsed.path or "").lower()
+    qs = parse_qs(parsed.query)
+    parcel_keys = ("parcelid", "parcelId", "ParcelId", "pcn", "folio", "strap")
+    parcel_id = None
+    for key in parcel_keys:
+        if key in qs and qs[key]:
+            parcel_id = qs[key][0]
+            break
+    if not parcel_id:
+        m = re.search(
+            r"(?:parcelid|parcelId|pcn|folio|strap)=([^&#]+)",
+            url,
+            re.I,
+        )
+        if m:
+            parcel_id = m.group(1)
+
+    if parcel_id and re.search(r"print(building|property|parcel|card|details)", path_low, re.I):
+        q = urlencode({"parcelId": parcel_id})
+        return f"{parsed.scheme}://{parsed.netloc}/Property/Details?{q}"
+
+    base = url.split("?")[0].split("#")[0]
     if base.lower().endswith("/print"):
         return base[: -len("/print")]
-    return re.sub(r"/print/?$", "", base, flags=re.I) or None
+    stripped = re.sub(r"/print/?$", "", base, flags=re.I)
+    return stripped or None
 
 
 def body_likely_property_detail(text: str, query_value: str = "") -> bool:
@@ -319,11 +352,52 @@ async def discover_print_route_url(page: Page) -> str | None:
     return None
 
 
+async def suppress_native_print_dialog(page: Page) -> None:
+    """Block window.print() on the active tab (avoids Chrome Save-as-PDF modal)."""
+    try:
+        await page.evaluate(_SUPPRESS_NATIVE_PRINT_INIT)
+    except Exception:
+        pass
+
+
+async def recover_from_print_route_page(page: Page, query_value: str = "") -> bool:
+    """Return to interactive parcel detail when stuck on a print-layout URL."""
+    if not is_print_route_url(page.url or ""):
+        return True
+
+    logger.warning("Recovering from print-layout URL: %s", (page.url or "")[:160])
+    await suppress_native_print_dialog(page)
+    for _ in range(2):
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(250)
+        except Exception:
+            pass
+
+    detail = detail_url_from_print_route(page.url or "")
+    if detail:
+        try:
+            await page.goto(detail, wait_until="domcontentloaded", timeout=28000)
+            await page.wait_for_timeout(700)
+            await suppress_native_print_dialog(page)
+            if not is_print_route_url(page.url or ""):
+                if query_value:
+                    await wait_for_property_detail_ready(page, query_value=query_value, timeout_ms=8000)
+                return True
+        except Exception as nav_exc:
+            logger.debug("Print-route recovery goto: %s", nav_exc)
+
+    if await escape_print_preview_route(page):
+        return True
+    return not is_print_route_url(page.url or "")
+
+
 async def escape_print_preview_route(page: Page) -> bool:
     """Leave a stuck /print URL without invoking the native print dialog."""
     if not is_print_route_url(page.url or ""):
         return False
     logger.warning("Leaving print-preview route: %s", (page.url or "")[:160])
+    await suppress_native_print_dialog(page)
     for _ in range(2):
         try:
             await page.keyboard.press("Escape")
@@ -336,10 +410,6 @@ async def escape_print_preview_route(page: Page) -> bool:
         return not is_print_route_url(page.url or "")
     except Exception as exc:
         logger.debug("go_back from print route: %s", exc)
-    try:
-        await page.evaluate(_SUPPRESS_NATIVE_PRINT_INIT)
-    except Exception:
-        pass
     return False
 
 
@@ -401,46 +471,22 @@ async def capture_assessor_pdf_best_effort(
     query_value: str = "",
 ) -> bool:
     """
-    Save assessor card PDF without opening the native print dialog:
-    detail render → blocked /print URL → other file downloads.
+    Save assessor card via Playwright page.pdf() on GIS embeds only.
+    Standalone county portals (pbcpao, etc.) use screenshot capture — never print-layout URLs.
     """
+    await recover_from_print_route_page(page, query_value)
     await ensure_property_detail_workspace(page, query_value)
 
     if is_standalone_parcel_detail_url(page.url or ""):
         return False
 
-    if not is_print_route_url(page.url or ""):
+    if is_print_route_url(page.url or ""):
+        await recover_from_print_route_page(page, query_value)
+        return False
+
+    if is_gis_portal_url(page.url or ""):
         if await render_assessor_detail_pdf_playwright(page, dest_pdf, query_value=query_value):
             return True
-
-    print_url = await discover_print_route_url(page)
-    if print_url:
-        if await capture_print_route_as_pdf(page, print_url, dest_pdf, query_value=query_value):
-            return True
-
-    if is_print_route_url(page.url or ""):
-        from pathlib import Path
-
-        pdf_path = Path(dest_pdf)
-        pdf_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            await page.evaluate(_SUPPRESS_NATIVE_PRINT_INIT)
-            await page.emulate_media(media="print")
-            await page.pdf(
-                path=str(pdf_path),
-                format="Letter",
-                print_background=True,
-                prefer_css_page_size=True,
-                margin=PDF_RENDER_MARGIN,
-            )
-            if pdf_path.exists() and pdf_path.stat().st_size > 1500:
-                raw = pdf_path.read_bytes()
-                if pdf_bytes_looks_valid(raw, query_value):
-                    await escape_print_preview_route(page)
-                    return True
-        except Exception as exc:
-            logger.debug("Inline print-route PDF render: %s", exc)
-        await escape_print_preview_route(page)
 
     return await try_portal_assessor_file_download(page, dest_pdf, query_value=query_value)
 
@@ -1023,7 +1069,8 @@ def is_standalone_parcel_detail_url(url: str) -> bool:
 
 
 EXPAND_DETAIL_SECTIONS_JS = r"""async () => {
-    const skip = (t) => /^(close|print|map|search|qv|home)$/i.test(String(t || '').trim());
+    const skip = (t) => /^(close|print|map|search|qv|home|nearby)$/i.test(String(t || '').trim());
+    const hint = /owner|sales|exemption|property|appraisal|assessed|taxable|taxes|information|value|legal|mailing/i;
     const clickables = document.querySelectorAll(
         'button[aria-expanded="false"], [role="button"][aria-expanded="false"], ' +
         '.accordion-toggle, .panel-heading a, a[data-toggle="collapse"], ' +
@@ -1032,12 +1079,27 @@ EXPAND_DETAIL_SECTIONS_JS = r"""async () => {
     for (const el of clickables) {
         const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
         if (skip(t)) continue;
-        try { el.click(); } catch (_) {}
+        if (hint.test(t) || el.getAttribute('aria-expanded') === 'false') {
+            try { el.click(); } catch (_) {}
+        }
     }
+    document.querySelectorAll('tr, div, button, a').forEach((el) => {
+        const raw = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (raw.length > 72 || !hint.test(raw)) return;
+        if (skip(raw)) return;
+        if (el.getAttribute('aria-expanded') === 'false' || /\+\s*$/.test(raw)) {
+            try { el.click(); } catch (_) {}
+        }
+    });
     document.querySelectorAll('a, button, span, i, div').forEach((el) => {
         const t = (el.innerText || el.title || '').trim();
-        if (t === '+' || /^expand$/i.test(t) || /show\s+more/i.test(t)) {
-            try { el.click(); } catch (_) {}
+        if (t === '+' || t === '▶' || /^expand$/i.test(t) || /show\s+more/i.test(t)) {
+            const row = el.closest('tr, div, li');
+            if (row && hint.test((row.innerText || ''))) {
+                try { row.click(); } catch (_) {}
+            } else {
+                try { el.click(); } catch (_) {}
+            }
         }
     });
 }"""
@@ -1060,7 +1122,18 @@ SCROLL_PAGE_FOR_LAZY_LOAD_JS = r"""async () => {
 }"""
 
 
-async def expand_collapsible_detail_sections(page: Page) -> None:
+async def expand_collapsible_detail_sections(
+    page: Page,
+    *,
+    query_value: str = "",
+) -> None:
+    try:
+        from app.browser.detail_sections_ai import expand_property_detail_sections_ai
+
+        await expand_property_detail_sections_ai(page, query_value=query_value)
+    except Exception as ai_expand_err:
+        logger.debug("AI detail section expansion note: %s", ai_expand_err)
+
     for scope in [page, *page.frames]:
         try:
             await scope.evaluate(EXPAND_DETAIL_SECTIONS_JS)
@@ -1416,6 +1489,8 @@ async def prepare_property_detail_view(
     query_value: str = "",
 ) -> None:
     """Dismiss blocking modals and open parcel detail content before screenshot/PDF."""
+    await recover_from_print_route_page(page, query_value)
+    await suppress_native_print_dialog(page)
     await dismiss_blocking_disclaimer(page, workflow_run_id=workflow_run_id, node_id=node_id)
     if is_gis_portal_url(page.url or ""):
         await ensure_gis_parcel_detail(page, query_value)
@@ -1427,6 +1502,7 @@ async def prepare_property_detail_view(
         await activate_parcel_details_tab(page, skip_print_routes=True)
     await dismiss_blocking_disclaimer(page, workflow_run_id=workflow_run_id, node_id=node_id)
     await wait_for_property_detail_ready(page, query_value=query_value, timeout_ms=6000)
+    await expand_collapsible_detail_sections(page, query_value=query_value)
 
     for sel in DETAIL_PANEL_SELECTORS:
         try:
@@ -1501,6 +1577,7 @@ async def render_assessor_detail_pdf_playwright(
     await escape_print_preview_route(page)
     await ensure_gis_parcel_detail(page, query_value)
     await activate_parcel_details_tab(page)
+    await expand_collapsible_detail_sections(page, query_value=query_value)
     if await page_has_portal_search_error(page):
         logger.warning("Portal search error on page — skipping Playwright PDF render")
         return False
@@ -1666,9 +1743,7 @@ async def try_portal_assessor_file_download(
                 if href.lower().startswith("javascript:"):
                     continue
                 if _href_looks_like_print_route(href):
-                    logger.info("Capturing print-route PDF via Playwright (no native dialog): %s", href[:120])
-                    if await capture_print_route_as_pdf(page, href, pdf_path, query_value=query_value):
-                        return True
+                    logger.debug("Skipping print-layout link (screenshot capture used instead): %s", href[:120])
                     continue
                 logger.info("Trying assessor download link: %s", (href or sel)[:120])
                 try:
@@ -1685,8 +1760,6 @@ async def try_portal_assessor_file_download(
                         if not href or href == "#":
                             continue
                         if _href_looks_like_print_route(href):
-                            if await capture_print_route_as_pdf(page, href, pdf_path, query_value=query_value):
-                                return True
                             continue
                         async with page.context.expect_page(timeout=10000) as pop_info:
                             await link.click(force=True, timeout=3000)
@@ -1774,6 +1847,8 @@ async def capture_property_detail_png_bytes(page: Page, *, query_value: str = ""
 
 async def capture_detail_screenshot_bytes(page: Page, *, query_value: str = "") -> bytes | None:
     """Prefer a detail panel crop; fall back to full-page when property detail is visible."""
+    await recover_from_print_route_page(page, query_value)
+    await suppress_native_print_dialog(page)
     if await disclaimer_still_visible(page):
         logger.warning("Skipping screenshot: disclaimer overlay still visible")
         return None
@@ -1787,7 +1862,7 @@ async def capture_detail_screenshot_bytes(page: Page, *, query_value: str = "") 
 
     if is_standalone_parcel_detail_url(page.url or ""):
         await wait_for_property_detail_ready(page, query_value=query_value, timeout_ms=12000)
-        await expand_collapsible_detail_sections(page)
+        await expand_collapsible_detail_sections(page, query_value=query_value)
         await scroll_property_detail_page(page)
         try:
             png = await page.screenshot(full_page=True, type="png")
@@ -1839,8 +1914,12 @@ async def capture_detail_screenshot_bytes(page: Page, *, query_value: str = "") 
             logger.warning("Skipping full-page screenshot: no property detail text on page")
             return None
 
+    if is_print_route_url(page.url or ""):
+        logger.warning("Still on print-layout URL; refusing screenshot of print preview")
+        return None
+
     try:
-        await expand_collapsible_detail_sections(page)
+        await expand_collapsible_detail_sections(page, query_value=query_value)
         await scroll_property_detail_page(page)
         png = await page.screenshot(full_page=True, type="png")
         if png and len(png) > 4000:

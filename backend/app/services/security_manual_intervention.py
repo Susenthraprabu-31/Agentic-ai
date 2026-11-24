@@ -38,6 +38,8 @@ def _pref_key(run_id: str) -> str:
 
 
 async def _redis() -> Any | None:
+    if not settings.USE_REDIS:
+        return None
     global _redis_client, _redis_loop
     try:
         loop = asyncio.get_running_loop()
@@ -73,10 +75,17 @@ def manual_intervention_enabled() -> bool:
 
 async def init_run_manual_intervention_pref(run_id: str) -> None:
     """Seed per-run preference from env default when a workflow run starts."""
+    from app.workers.inprocess_ipc import kv_get_str, kv_set_str, use_inprocess_ipc
+
+    key = _pref_key(str(run_id))
+    if use_inprocess_ipc():
+        if await kv_get_str(key) is None:
+            val = "1" if manual_intervention_default_enabled() else "0"
+            await kv_set_str(key, val, _INTERVENTION_TTL)
+        return
     client = await _redis()
     if not client:
         return
-    key = _pref_key(str(run_id))
     try:
         if await client.get(key) is None:
             val = "1" if manual_intervention_default_enabled() else "0"
@@ -86,11 +95,19 @@ async def init_run_manual_intervention_pref(run_id: str) -> None:
 
 
 async def _get_run_pref_bool(run_id: str) -> bool | None:
+    from app.workers.inprocess_ipc import kv_get_str, use_inprocess_ipc
+
+    key = _pref_key(str(run_id))
+    if use_inprocess_ipc():
+        raw = await kv_get_str(key)
+        if raw is None:
+            return None
+        return raw in ("1", "true", "True", "yes", "on")
     client = await _redis()
     if not client:
         return None
     try:
-        raw = await client.get(_pref_key(str(run_id)))
+        raw = await client.get(key)
         if raw is None:
             return None
         return raw in ("1", "true", "True", "yes", "on")
@@ -99,11 +116,18 @@ async def _get_run_pref_bool(run_id: str) -> bool | None:
 
 
 async def set_manual_intervention_pref(run_id: str, enabled: bool) -> None:
+    from app.workers.inprocess_ipc import kv_set_str, use_inprocess_ipc
+
+    key = _pref_key(str(run_id))
+    val = "1" if enabled else "0"
+    if use_inprocess_ipc():
+        await kv_set_str(key, val, _INTERVENTION_TTL)
+        return
     client = await _redis()
     if not client:
         return
     try:
-        await client.set(_pref_key(str(run_id)), "1" if enabled else "0", ex=_INTERVENTION_TTL)
+        await client.set(key, val, ex=_INTERVENTION_TTL)
     except Exception as exc:
         logger.warning("Failed to set manual intervention pref for %s: %s", run_id, exc)
 
@@ -139,10 +163,28 @@ async def set_manual_intervention_state(
     portal_url: str | None = None,
     url: str | None = None,
 ) -> None:
+    from app.workers.inprocess_ipc import kv_delete, kv_set_str, use_inprocess_ipc
+
+    key = _state_key(str(run_id))
+    if use_inprocess_ipc():
+        if not active:
+            await kv_delete(key)
+            return
+        payload = {
+            "active": True,
+            "reason": reason or "Security verification required",
+            "event_type": event_type or "cloudflare",
+            "portal_url": portal_url or "",
+            "url": url or "",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "timeout_sec": int(getattr(settings, "BROWSER_MANUAL_INTERVENTION_TIMEOUT_SEC", 600)),
+        }
+        await kv_set_str(key, json.dumps(payload), _INTERVENTION_TTL)
+        await kv_delete(_cleared_key(str(run_id)))
+        return
     client = await _redis()
     if not client:
         return
-    key = _state_key(str(run_id))
     if not active:
         try:
             await client.delete(key)
@@ -166,11 +208,23 @@ async def set_manual_intervention_state(
 
 
 async def get_manual_intervention_state(run_id: str) -> dict[str, Any] | None:
+    from app.workers.inprocess_ipc import kv_get_str, use_inprocess_ipc
+
+    key = _state_key(str(run_id))
+    if use_inprocess_ipc():
+        raw = await kv_get_str(key)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
     client = await _redis()
     if not client:
         return None
     try:
-        raw = await client.get(_state_key(str(run_id)))
+        raw = await client.get(key)
         if not raw:
             return None
         data = json.loads(raw)
@@ -180,22 +234,33 @@ async def get_manual_intervention_state(run_id: str) -> dict[str, Any] | None:
 
 
 async def signal_manual_intervention_complete(run_id: str) -> bool:
+    from app.workers.inprocess_ipc import kv_set_str, use_inprocess_ipc
+
+    key = _cleared_key(str(run_id))
+    if use_inprocess_ipc():
+        await kv_set_str(key, "1", 3600)
+        return True
     client = await _redis()
     if not client:
         return False
     try:
-        await client.set(_cleared_key(str(run_id)), "1", ex=3600)
+        await client.set(key, "1", ex=3600)
         return True
     except Exception:
         return False
 
 
 async def _user_signalled_cleared(run_id: str) -> bool:
+    from app.workers.inprocess_ipc import kv_get_str, use_inprocess_ipc
+
+    key = _cleared_key(str(run_id))
+    if use_inprocess_ipc():
+        return (await kv_get_str(key)) == "1"
     client = await _redis()
     if not client:
         return False
     try:
-        return (await client.get(_cleared_key(str(run_id)))) == "1"
+        return (await client.get(key)) == "1"
     except Exception:
         return False
 

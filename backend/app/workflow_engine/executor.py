@@ -288,6 +288,21 @@ class WorkflowExecutor:
             await self.db.refresh(run)
             return run
         if expected_fencing_token is not None and db_fence > expected_fencing_token:
+            if final_status in ("COMPLETED", "PARTIALLY_COMPLETED") and all(
+                (node_runs_by_nid.get(nid) and (node_runs_by_nid[nid].status or "").upper() == "COMPLETED")
+                for nid in context.node_statuses
+            ):
+                from app.services.recovery_service import RecoveryService
+
+                recovery = RecoveryService(self.db)
+                finalized = await recovery.finalize_completed_runs_stuck_in_progress()
+                if finalized:
+                    await self.db.refresh(run)
+                    logger.info(
+                        "Reconciled fenced-out WorkflowRun %s to terminal state after successful nodes.",
+                        run.id,
+                    )
+                    return run
             logger.warning(
                 "Finalization aborted for run %s: DB fencing_token %d > worker token %d. Worker was fenced out.",
                 run.id,

@@ -19,6 +19,7 @@ from app.models.recovery import RecoveryStatus, WorkflowRecoveryRecord
 from app.models.result import AssessorResult, TaxResult
 from app.models.retry_attempt import RetryAttempt, RetryAttemptStatus
 from app.models.security_event import SecurityEvent, SecurityEventType
+from app.models.storage_sync import StorageSyncQueue
 from app.models.user import RefreshToken, User
 from app.models.worker import WorkerRecord, WorkerStatus
 from app.models.workflow import Workflow, WorkflowVersion
@@ -53,6 +54,7 @@ __all__ = [
     "RunStatus",
     "SecurityEvent",
     "SecurityEventType",
+    "StorageSyncQueue",
     "SourceConfiguration",
     "TaxResult",
     "TemplateVersion",

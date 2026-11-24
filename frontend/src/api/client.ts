@@ -1,10 +1,28 @@
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { useAuthStore } from "@/store/authStore";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "/api/v1";
+async function resolveBaseUrl(): Promise<string> {
+  if (typeof window !== "undefined" && window.electronAPI?.getApiBaseUrl) {
+    try {
+      return await window.electronAPI.getApiBaseUrl();
+    } catch {
+      /* fall through */
+    }
+  }
+  return import.meta.env.VITE_API_URL ?? "/api/v1";
+}
+
+const initialBaseUrl = import.meta.env.VITE_API_URL ?? "/api/v1";
+let BASE_URL = initialBaseUrl;
+if (typeof window !== "undefined" && window.electronAPI?.getApiBaseUrl) {
+  void resolveBaseUrl().then((url) => {
+    BASE_URL = url;
+    apiClient.defaults.baseURL = url;
+  });
+}
 
 export const apiClient = axios.create({
-  baseURL: BASE_URL,
+  baseURL: initialBaseUrl,
   headers: { "Content-Type": "application/json" },
   timeout: 30000,
   withCredentials: true, // Send HttpOnly cookies for refresh token handling

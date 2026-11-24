@@ -2012,6 +2012,10 @@ You also receive a screenshot of the live portal. Use it together with the DOM s
 - Stacked Schneider/qPublic pages: expand the panel that contains the chosen input (btnHeaderToggle) before fill; never type into the first visible text box if it belongs to another section (e.g. Owner vs Location Address).
 - On floridapa / Schneider GIS map portals: after search, open Parcel Details (not GIS Map), wait for owner/situs tables or detail iframe — do NOT click toolbar Print (native browser dialog). Automation saves PDF via Playwright directly to storage.
 - **Homepage / hero combined search:** When one visible text box accepts owner, address, and parcel/PCN together with a adjacent **Search** submit (often `input[type=submit]` with an id such as `btnReal`), set `input_selector` to that box and `submit_selector` to that submit control exactly from the snapshot. Set `tab_selector` to null — do not click sidebar or quick links (Address Change, Map Search, forms). Never use browser translate widgets (`goog-gt-*`) as submit.
+- **county-taxes.net / Miami-Dade (Phenix) — search stops when bills are on screen:** After Search, many parcels open the **account detail** immediately (table with columns BILL, AMOUNT DUE, STATUS, ACTION; rows like "2026 Annual Bill", Paid $…, Receipt #…, Print PDF). If the screenshot shows that bill history table, the search succeeded on the **current** page — return `tab_selector`, `radio_selector`, and any *extra* navigation selectors as **null**. Do NOT plan clicks on the blue **Menu** drawer, sidebar links (Property Tax, Business Tax, Reports, Get Bills By Email, Vehicle Registration), hamburger icons, or a second **Search**. Close mentally past any **Public notifications** overlay (X) — never set `submit_selector` to links inside that modal.
+- **county-taxes.net results vs detail:** If a short results list appears, only one account row should be opened when multiple rows exist; if the detail table is already visible, do **not** add selectors that navigate again. Never use **Print (PDF)** or receipt links as `submit_selector` / `tab_selector` (they open print/PDF flows, not search).
+- **county-taxes.net unified search bar:** On `…/property-tax` use the single name/address/account/folio field and the one in-page Search control — not header/menu Property Tax links.
+- **Slow SPAs:** Follow assessor rule 9 — preparation **playwright_diagnostic_steps** from the live snapshot, then full selectors for recipe reuse once inputs are visible.
 """
 
 SECURITY_PROMPT_SUFFIX = """
@@ -2159,6 +2163,34 @@ async def _run_security_diagnostic_steps(
         )
 
 
+def _plan_needs_ai_page_preparation(plan: dict[str, Any]) -> bool:
+    """AI-authored wait/load steps while the portal SPA is still mounting (not a security barrier)."""
+    if _plan_indicates_security_barrier(plan):
+        return False
+    diag = _sanitize_diagnostic_steps(plan.get("playwright_diagnostic_steps"))
+    if not diag:
+        return False
+    has_search = bool(plan.get("input_selector") or plan.get("fills"))
+    conf = (plan.get("confidence") or "").strip().lower()
+    return not has_search or conf == "low"
+
+
+async def _run_ai_page_preparation_steps(
+    page: Page,
+    steps: list[dict[str, Any]],
+    workflow_run_id: str | None,
+    node_id: str | None,
+) -> None:
+    from app.browser.step_runner import PlaywrightStepRunner
+
+    runner = PlaywrightStepRunner(page, str(workflow_run_id or ""), str(node_id or ""))
+    await runner.execute_steps(
+        _sanitize_diagnostic_steps(steps),
+        {},
+        security_barrier_mode=False,
+    )
+
+
 SYSTEM_PROMPT_ASSESSOR = """You analyze property appraiser, assessor, and county tax collector websites and return Playwright CSS selectors to run a search.
 
 Given:
@@ -2229,7 +2261,21 @@ Strict Rules:
 
 7. TAX COLLECTOR POST-SEARCH (planning context):
    - After Search on multi-year tax bill portals, the same page may list links like `R - <property number> - <year>` (one per tax year in a results table). That is a successful search — not a failed submit.
-   - Downstream automation opens **each** listed result in order, captures tax records/screenshots/PDFs, then returns to the results table for the next year. Plan `submit_selector` as `#search` when present; use a single `fills` entry for Property Number only."""
+   - Downstream automation opens **each** listed result in order, captures tax records/screenshots/PDFs, then returns to the results table for the next year. Plan `submit_selector` as `#search` when present; use a single `fills` entry for Property Number only.
+
+8. COUNTY-TAXES.NET / MIAMI-DADE — INLINE DETAIL (critical for extraction, plan search only):
+   - Phenix/Miami-Dade often skips a separate “results” page: one Search lands on the **tax account** with annual bill rows (2026 Annual Bill, 2025 Annual Bill, …), AMOUNT DUE, STATUS, Print (PDF). When the snapshot or screenshot already shows that grid, state in `reasoning` that **detail is already displayed** and keep `tab_selector` null — do not return selectors for Menu, Property Tax nav, or duplicate Search.
+   - Do not confuse the slide-out **Menu** (Get Bills By Email, Property Tax, Reports) with search controls; never set `tab_selector` or `submit_selector` to those links.
+   - **Public notifications** pop-up: not part of search; ignore its links for fill/submit; automation dismisses the X separately.
+   - **Print (PDF)** in the ACTION column is for downloads, not navigation to “more detail” — never use as submit or tab.
+   - parcel/address query: fill the unified search field once, click the form Search once. If the URL already contains an account segment and the bill table is visible, return minimal plan (no further clicks) so extraction reads the current page.
+   - Wrong behavior to avoid: navigating to another property-tax route or menu item after bills are visible; leaving the account page without extracting AMOUNT DUE / Paid / Receipt data on screen.
+
+9. PAGE STILL LOADING (heavy SPA — not a security barrier):
+   - When bundles are downloading and search inputs are missing from the snapshot, keep **security_barrier_detected** false.
+   - Set **input_selector**, **fills**, **submit_selector**, **tab_selector**, and **radio_selector** to null.
+   - Return **playwright_diagnostic_steps** only: `wait`, `wait_for_load_state`, `wait_for_selector` (use **timeout_ms** up to 90000 on selectors from the partial snapshot or likely mount targets).
+   - Execution runs those steps, re-analyzes the DOM, and asks you again for the full search plan (stored in recipes on success). Do not guess folio/parcel CSS before the field exists in the snapshot."""
 
 # Fallback generic scrape for standard property cards
 PROPERTY_SCRAPE_JS = """
@@ -2479,6 +2525,10 @@ class PageSearchAI:
             return False
         if "view or pay a tax bill" in body or "click the property number below" in body:
             return True
+        if "search selection" in body and q_digits and len(q_digits) >= 8:
+            years = set(re.findall(r"\b20\d{2}\b", body, re.I))
+            if len(years) >= 2 and q_digits in re.sub(r"\D", "", body):
+                return True
         if q_digits and len(q_digits) >= 8:
             esc = re.escape(query_value.strip()).replace(r"\-", r"[\s\-]*")
             if re.search(rf"\bR\s*-\s*{esc}\s*-\s*20\d{{2}}\b", body, re.I):
@@ -2994,6 +3044,45 @@ class PageSearchAI:
         )
         plan.update(plan_seed)
         plan.setdefault("_tax_portal_search_url", portal_url or page.url or "")
+
+        for _prep_round in range(2):
+            if not _plan_needs_ai_page_preparation(plan):
+                break
+            diag_prep = _sanitize_diagnostic_steps(plan.get("playwright_diagnostic_steps"))
+            if not diag_prep:
+                break
+            await _log(
+                "prepare_page",
+                f"Running {len(diag_prep)} AI Playwright preparation step(s) while portal loads",
+                1,
+            )
+            try:
+                await _run_ai_page_preparation_steps(
+                    page, diag_prep, workflow_run_id, node_id
+                )
+            except Exception as prep_err:
+                logger.warning("AI page preparation steps failed: %s", prep_err)
+                await _log(
+                    "prepare_page",
+                    f"AI preparation steps error: {prep_err}",
+                    1,
+                    status="WARNING",
+                )
+            await page.wait_for_timeout(600)
+            snapshot = await self.extract_snapshot(page)
+            sec_hint = await _page_security_hint(page)
+            if sec_hint:
+                snapshot["security_barrier_hint"] = sec_hint
+            plan = await self.plan_search(
+                snapshot,
+                query_type,
+                query_value,
+                page=page,
+                workflow_run_id=workflow_run_id,
+                node_id=node_id,
+            )
+            plan.update(plan_seed)
+            plan.setdefault("_tax_portal_search_url", portal_url or page.url or "")
 
         if _plan_indicates_security_barrier(plan):
             diag = plan.get("playwright_diagnostic_steps") or DEFAULT_SECURITY_DIAGNOSTIC_STEPS
@@ -4948,19 +5037,78 @@ class PageSearchAI:
             pass
 
         res_click_info: dict[str, Any] = {}
-        multi_tax_results_list = await self._page_shows_tax_bill_result_list(page, query_value)
+        from app.extraction.tax_collector_reports import (
+            sanitize_tax_results_list_url,
+            wait_for_tax_search_results_listing,
+            capture_all_tax_search_result_records,
+            is_tax_collector_portal,
+        )
+
+        listing_probe: dict[str, Any] = {"ready": False, "link_count": 0, "results_url": ""}
+        if is_tax_collector_portal(page.url) or any(
+            is_tax_collector_portal(f.url or "") for f in page.frames
+        ):
+            listing_probe = await wait_for_tax_search_results_listing(page, query_value, timeout_s=14)
+
+        multi_tax_results_list = bool(
+            await self._page_shows_tax_bill_result_list(page, query_value)
+            or (listing_probe.get("ready") and int(listing_probe.get("link_count") or 0) >= 2)
+        )
+        if not multi_tax_results_list:
+            listing_probe = await wait_for_tax_search_results_listing(page, query_value, timeout_s=10)
+            multi_tax_results_list = bool(
+                await self._page_shows_tax_bill_result_list(page, query_value)
+                or (listing_probe.get("ready") and int(listing_probe.get("link_count") or 0) >= 2)
+            )
         if multi_tax_results_list:
-            plan["_tax_search_results_url"] = page.url
+            from app.extraction.tax_collector_reports import tax_search_results_same_document_state
+
+            plan["_tax_results_same_document"] = tax_search_results_same_document_state(page.url)
+            plan["_tax_search_results_url"] = sanitize_tax_results_list_url(
+                listing_probe.get("results_url") or page.url
+            )
             plan["_tax_portal_search_url"] = (
                 plan.get("_tax_portal_search_url") or (page.url or "").split("#")[0]
             )
+            if not plan.get("_tax_multi_captured"):
+                search_in = (
+                    (plan.get("fills") or [{}])[0].get("selector")
+                    or plan.get("input_selector")
+                    or ""
+                ).strip() or None
+                search_sub = (plan.get("submit_selector") or "").strip() or None
+                portal_search_url = (
+                    plan.get("_tax_portal_search_url") or plan["_tax_search_results_url"] or page.url
+                ).strip()
+                multi_docs, multi_meta = await capture_all_tax_search_result_records(
+                    page,
+                    query_value.strip(),
+                    results_list_url=plan["_tax_search_results_url"],
+                    portal_search_url=portal_search_url,
+                    search_input_selector=search_in,
+                    search_submit_selector=search_sub,
+                    workflow_run_id=str(workflow_run_id or ""),
+                )
+                plan["_tax_multi_docs"] = multi_docs
+                plan["_tax_multi_meta"] = multi_meta
+                plan["_tax_multi_captured"] = True
+                await _log_act(
+                    "extract",
+                    (
+                        f"Captured search results index + "
+                        f"{multi_meta.get('tax_search_results_count', 0)} recent tax bill year(s)"
+                    ),
+                    6,
+                )
+                already_on_detail = True
+                detail_opened = True
         if already_on_detail:
             detail_opened = True
         try:
             from app.browser.property_capture_prep import page_is_search_results_listing
 
             on_results_grid = await page_is_search_results_listing(page)
-            if on_results_grid:
+            if on_results_grid and not multi_tax_results_list:
                 already_on_detail = False
                 detail_opened = False
         except Exception:
@@ -5090,10 +5238,13 @@ class PageSearchAI:
 
         # 6. Extract Property Details across Sections (Dynamic Universal Extraction)
         final_record: dict[str, Any] = {}
-        downloaded_docs: list[dict[str, Any]] = []
+        downloaded_docs: list[dict[str, Any]] = list(plan.get("_tax_multi_docs") or [])
 
         # 6A. Dynamic Full-Page Universal DOM Extraction
         try:
+            skip_listing_dom = multi_tax_results_list or bool(plan.get("_tax_multi_captured"))
+            if skip_listing_dom:
+                raise RuntimeError("skip_dom_on_tax_year_listing")
             for target_scope in [page, *[f for f in page.frames if f != page.main_frame]]:
                 dyn_data = await target_scope.evaluate(DYNAMIC_FULL_PAGE_EXTRACTION_JS)
                 if dyn_data and isinstance(dyn_data, dict):
@@ -5108,17 +5259,20 @@ class PageSearchAI:
                                 final_record[k] = v
                         break
         except Exception as dyn_err:
-            logger.warning("Dynamic full-page extraction error: %s", dyn_err)
+            if str(dyn_err) != "skip_dom_on_tax_year_listing":
+                logger.warning("Dynamic full-page extraction error: %s", dyn_err)
 
         # 6B. Mistral Document AI OCR Webpage Extraction (detail panel / full page)
         try:
             from app.browser.property_capture_prep import prepare_property_detail_view, sanitize_extracted_record
-            await prepare_property_detail_view(
-                page, workflow_run_id=workflow_run_id, node_id=node_id, query_value=query_value
-            )
+            skip_tax_listing_ocr = multi_tax_results_list or bool(plan.get("_tax_multi_captured"))
+            if not skip_tax_listing_ocr:
+                await prepare_property_detail_view(
+                    page, workflow_run_id=workflow_run_id, node_id=node_id, query_value=query_value
+                )
             from app.extraction.mistral_webpage_ocr import get_mistral_webpage_ocr
             ocr_srv = get_mistral_webpage_ocr()
-            if ocr_srv.is_enabled():
+            if ocr_srv.is_enabled() and not skip_tax_listing_ocr:
                 logger.info("Executing Mistral Document AI OCR on full-page screenshot for 100%% accuracy...")
                 ocr_rec = await ocr_srv.extract_from_page(page, query_value=query_value)
                 if ocr_rec:
@@ -5150,23 +5304,27 @@ class PageSearchAI:
             logger.warning("Mistral OCR webpage extraction note: %s", ocr_err)
 
         # 6C. Dynamic Official Assessor Report Download for Any Portal
-        try:
-            from app.extraction.assessor_reports import download_universal_assessor_reports
-            from app.browser.property_capture_prep import is_plausible_parcel_id
+        if not multi_tax_results_list and not plan.get("_tax_multi_captured"):
+            try:
+                from app.extraction.assessor_reports import download_universal_assessor_reports
+                from app.browser.property_capture_prep import is_plausible_parcel_id
 
-            target_p = final_record.get("parcel_number") or query_value
-            if not is_plausible_parcel_id(str(target_p), query_value):
-                target_p = query_value
-            reports = await download_universal_assessor_reports(
-                page, str(target_p), query_value=query_value
-            )
-            if reports:
-                downloaded_docs.extend(reports)
-        except Exception as r_err:
-            logger.debug("Dynamic assessor report download note: %s", r_err)
+                target_p = final_record.get("parcel_number") or query_value
+                if not is_plausible_parcel_id(str(target_p), query_value):
+                    target_p = query_value
+                reports = await download_universal_assessor_reports(
+                    page, str(target_p), query_value=query_value
+                )
+                if reports:
+                    downloaded_docs.extend(reports)
+            except Exception as r_err:
+                logger.debug("Dynamic assessor report download note: %s", r_err)
 
         # 6D. General Florida & Fallback Extraction
-        if not final_record.get("owner_name") or final_record.get("owner_name") == "OWNER OF RECORD":
+        if (
+            not plan.get("_tax_multi_captured")
+            and (not final_record.get("owner_name") or final_record.get("owner_name") == "OWNER OF RECORD")
+        ):
             try:
                 for target_scope in [page, *[f for f in page.frames if f != page.main_frame]]:
                     fl_data = await target_scope.evaluate(FLORIDA_SCRAPE_JS)
@@ -5201,6 +5359,7 @@ class PageSearchAI:
                 capture_all_tax_search_result_records,
                 discover_tax_search_result_links,
                 download_official_tax_bill,
+                sanitize_tax_results_list_url,
             )
             if is_tax_collector_portal(page.url) or any("tax" in (f.url or "").lower() for f in page.frames):
                 logger.info("Extracting structured tax data from tax collector portal...")
@@ -5210,7 +5369,7 @@ class PageSearchAI:
                     if qt_plan == "parcel" and query_value.strip()
                     else (final_record.get("parcel_number") or query_value)
                 )
-                results_url = plan.get("_tax_search_results_url") or ""
+                results_url = sanitize_tax_results_list_url(plan.get("_tax_search_results_url") or "")
                 search_in = (
                     (plan.get("fills") or [{}])[0].get("selector")
                     or plan.get("input_selector")
@@ -5218,7 +5377,12 @@ class PageSearchAI:
                 ).strip() or None
                 search_sub = (plan.get("submit_selector") or "").strip() or None
                 portal_search_url = (plan.get("_tax_portal_search_url") or results_url or page.url or "").strip()
-                if results_url:
+                from app.extraction.tax_collector_reports import tax_search_results_same_document_state
+
+                if results_url and not (
+                    plan.get("_tax_results_same_document")
+                    or tax_search_results_same_document_state(results_url)
+                ):
                     try:
                         await page.goto(results_url, wait_until="domcontentloaded", timeout=25000)
                         await page.wait_for_timeout(1000)
@@ -5226,39 +5390,8 @@ class PageSearchAI:
                         logger.debug("Return to tax results list: %s", list_nav_err)
                 from app.extraction.tax_collector_reports import tax_search_result_link_matches_query
 
-                discovery = await discover_tax_search_result_links(page, parcel_key)
-                matched_links = [
-                    l
-                    for l in (discovery.get("links") or [])
-                    if tax_search_result_link_matches_query(str(l.get("text") or ""), parcel_key)
-                ]
-                if len(matched_links) >= 2 or (
-                    discovery.get("listing") and len(matched_links) == 1
-                ):
-                    if not results_url and await self._page_shows_tax_bill_result_list(page, query_value):
-                        results_url = page.url
-                        try:
-                            await page.goto(results_url, wait_until="domcontentloaded", timeout=20000)
-                            await page.wait_for_timeout(1000)
-                        except Exception:
-                            pass
-                    multi_docs, multi_meta = await capture_all_tax_search_result_records(
-                        page,
-                        parcel_key,
-                        results_list_url=results_url or page.url,
-                        portal_search_url=portal_search_url,
-                        search_input_selector=search_in,
-                        search_submit_selector=search_sub,
-                        workflow_run_id=str(workflow_run_id or ""),
-                    )
-                    if multi_docs:
-                        downloaded_docs.extend(multi_docs)
-                        detail_opened = True
-                        await _log_act(
-                            "extract",
-                            f"Captured {multi_meta.get('tax_search_results_count', 0)} tax bill years from search results",
-                            7,
-                        )
+                if plan.get("_tax_multi_captured"):
+                    multi_meta = plan.get("_tax_multi_meta") or {}
                     for y, rec in (multi_meta.get("tax_search_results_by_year") or {}).items():
                         if not isinstance(rec, dict):
                             continue
@@ -5269,28 +5402,79 @@ class PageSearchAI:
                                 final_record[k] = v
                     final_record["tax_search_results_years"] = multi_meta.get("tax_search_results_years") or []
                     final_record["tax_search_results_by_year"] = multi_meta.get("tax_search_results_by_year") or {}
+                    detail_opened = True
                 else:
-                    tax_rec = await extract_tax_collector_record(page, query_value=query_value)
-                    if tax_rec.get("owner_name") or tax_rec.get("total_amount_due") is not None or tax_rec.get("account_number"):
-                        for k, v in tax_rec.items():
-                            if v is not None and (k not in final_record or not final_record[k] or final_record[k] == "OWNER OF RECORD"):
-                                final_record[k] = v
-
-                    suite_docs, suite_meta = await capture_tax_collector_document_suite(
-                        page,
-                        parcel_key,
-                        account_history=tax_rec.get("account_history"),
+                    discovery = await discover_tax_search_result_links(page, parcel_key)
+                    matched_links = [
+                        l
+                        for l in (discovery.get("links") or [])
+                        if tax_search_result_link_matches_query(str(l.get("text") or ""), parcel_key)
+                    ]
+                    use_multi_year_capture = (
+                        multi_tax_results_list
+                        or len(matched_links) >= 2
+                        or (discovery.get("listing") and len(matched_links) >= 1)
                     )
-                    downloaded_docs.extend(suite_docs)
-                    final_record["tax_screenshot_index"] = suite_meta.get("tax_screenshot_index") or []
-                    final_record["tax_years_indexed"] = suite_meta.get("tax_years_indexed") or []
-                    final_record["tax_recent_year_screenshots"] = (
-                        suite_meta.get("tax_recent_year_screenshots") or []
-                    )
+                    if use_multi_year_capture:
+                        if not results_url and await self._page_shows_tax_bill_result_list(page, query_value):
+                            results_url = page.url
+                            try:
+                                await page.goto(results_url, wait_until="domcontentloaded", timeout=20000)
+                                await page.wait_for_timeout(1000)
+                            except Exception:
+                                pass
+                        multi_docs, multi_meta = await capture_all_tax_search_result_records(
+                            page,
+                            parcel_key,
+                            results_list_url=results_url or page.url,
+                            portal_search_url=portal_search_url,
+                            search_input_selector=search_in,
+                            search_submit_selector=search_sub,
+                            workflow_run_id=str(workflow_run_id or ""),
+                        )
+                        if multi_docs:
+                            downloaded_docs.extend(multi_docs)
+                            detail_opened = True
+                            await _log_act(
+                                "extract",
+                                (
+                                    f"Captured search results index + "
+                                    f"{multi_meta.get('tax_search_results_count', 0)} recent tax bill year(s)"
+                                ),
+                                7,
+                            )
+                        for y, rec in (multi_meta.get("tax_search_results_by_year") or {}).items():
+                            if not isinstance(rec, dict):
+                                continue
+                            for k, v in rec.items():
+                                if v is not None and (
+                                    k not in final_record or not final_record[k] or final_record[k] == "OWNER OF RECORD"
+                                ):
+                                    final_record[k] = v
+                        final_record["tax_search_results_years"] = multi_meta.get("tax_search_results_years") or []
+                        final_record["tax_search_results_by_year"] = multi_meta.get("tax_search_results_by_year") or {}
+                    elif not multi_tax_results_list and not results_url:
+                        tax_rec = await extract_tax_collector_record(page, query_value=query_value)
+                        if tax_rec.get("owner_name") or tax_rec.get("total_amount_due") is not None or tax_rec.get("account_number"):
+                            for k, v in tax_rec.items():
+                                if v is not None and (k not in final_record or not final_record[k] or final_record[k] == "OWNER OF RECORD"):
+                                    final_record[k] = v
 
-                    bill_doc = await download_official_tax_bill(page, parcel_key)
-                    if bill_doc:
-                        downloaded_docs.append(bill_doc)
+                        suite_docs, suite_meta = await capture_tax_collector_document_suite(
+                            page,
+                            parcel_key,
+                            account_history=tax_rec.get("account_history"),
+                        )
+                        downloaded_docs.extend(suite_docs)
+                        final_record["tax_screenshot_index"] = suite_meta.get("tax_screenshot_index") or []
+                        final_record["tax_years_indexed"] = suite_meta.get("tax_years_indexed") or []
+                        final_record["tax_recent_year_screenshots"] = (
+                            suite_meta.get("tax_recent_year_screenshots") or []
+                        )
+
+                        bill_doc = await download_official_tax_bill(page, parcel_key)
+                        if bill_doc:
+                            downloaded_docs.append(bill_doc)
         except Exception as tax_ex_err:
             logger.warning("Tax collector extraction note: %s", tax_ex_err)
 

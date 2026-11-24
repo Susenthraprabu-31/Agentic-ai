@@ -1,0 +1,72 @@
+{
+  "name": "title-search-desktop",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Title Search Platform — Windows desktop application",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/start-dev.cjs",
+    "dev:backend": "node scripts/start-backend.cjs",
+    "dev:frontend": "echo Run npm run dev from desktop folder (start-dev sets API port)",
+    "dev:electron": "echo Run npm run dev from desktop folder (start-dev sets API port)",
+    "build:frontend": "cross-env ELECTRON_BUILD=1 npm run build --prefix ../frontend",
+    "predist": "node scripts/pre-dist.cjs && node scripts/prepare-packaged-python.cjs",
+    "dist": "npm run build:frontend && node scripts/electron-dist.cjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "cross-env": "^7.0.3",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.0.12",
+    "wait-on": "^8.0.5"
+  },
+  "build": {
+    "appId": "com.skp.titlesearch",
+    "productName": "Title Search",
+    "directories": {
+      "output": "../dist-desktop",
+      "buildResources": "../installer"
+    },
+    "files": [
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../frontend/dist",
+        "to": "frontend",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../installer/scripts",
+        "to": "scripts",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "app/**/*",
+          "alembic/**/*",
+          "alembic.ini",
+          "requirements.txt"
+        ]
+      },
+      {
+        "from": "../installer/packaged-python/embed",
+        "to": "python/embed",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "TitleSearchSetup-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

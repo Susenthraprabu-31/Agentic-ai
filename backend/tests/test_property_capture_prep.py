@@ -39,6 +39,16 @@ def test_print_route_url_detection():
     assert is_print_route_url("https://search.ncpafl.com/parcel/27%20N%2035/print")
     assert not is_print_route_url("https://search.ncpafl.com/search/p/")
     assert _href_looks_like_print_route("/parcel/123/print")
+    assert is_print_route_url(
+        "https://www.pbcpao.gov/Property/PrintBuildingDetails?parcelId=73414404010230190"
+    )
+
+
+def test_detail_url_from_print_building_details():
+    recovered = detail_url_from_print_route(
+        "https://www.pbcpao.gov/Property/PrintBuildingDetails?parcelId=73414404010230190"
+    )
+    assert recovered == "https://www.pbcpao.gov/Property/Details?parcelId=73414404010230190"
 
 
 def test_standalone_parcel_detail_url():

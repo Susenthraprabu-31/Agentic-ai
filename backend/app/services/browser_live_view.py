@@ -30,6 +30,8 @@ def _meta_key(run_id: str) -> str:
 
 
 async def _get_redis() -> Any | None:
+    if not settings.USE_REDIS:
+        return None
     global _redis_client, _redis_loop
     try:
         loop = asyncio.get_running_loop()
@@ -63,8 +65,26 @@ async def publish_frame(
     viewport_height: int | None = None,
 ) -> None:
     """Store the latest JPEG frame and metadata for a workflow run."""
+    if not image_bytes:
+        return
+    from app.workers.inprocess_ipc import publish_live_frame, use_inprocess_ipc
+
+    if use_inprocess_ipc():
+        ttl = max(60, int(getattr(settings, "BROWSER_LIVE_FRAME_TTL_SECONDS", 3600)))
+        captured_at = datetime.now(timezone.utc).isoformat()
+        meta: dict[str, Any] = {
+            "url": url or "",
+            "captured_at": captured_at,
+            "content_type": "image/jpeg",
+        }
+        if viewport_width:
+            meta["viewport_width"] = viewport_width
+        if viewport_height:
+            meta["viewport_height"] = viewport_height
+        await publish_live_frame(run_id, image_bytes, meta, ttl)
+        return
     client = await _get_redis()
-    if not client or not image_bytes:
+    if not client:
         return
     ttl = max(60, int(getattr(settings, "BROWSER_LIVE_FRAME_TTL_SECONDS", 3600)))
     captured_at = datetime.now(timezone.utc).isoformat()
@@ -83,6 +103,10 @@ async def publish_frame(
 
 
 async def get_latest_frame(run_id: str) -> tuple[bytes | None, dict[str, Any]]:
+    from app.workers.inprocess_ipc import get_live_frame, use_inprocess_ipc
+
+    if use_inprocess_ipc():
+        return await get_live_frame(run_id)
     client = await _get_redis()
     if not client:
         return None, {}
@@ -245,6 +269,11 @@ async def stop_live_capture_for_run(run_id: str) -> None:
 
 
 async def clear_live_frames(run_id: str) -> None:
+    from app.workers.inprocess_ipc import clear_live_frame, use_inprocess_ipc
+
+    if use_inprocess_ipc():
+        await clear_live_frame(run_id)
+        return
     client = await _get_redis()
     if not client:
         return

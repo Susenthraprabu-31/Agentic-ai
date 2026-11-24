@@ -43,7 +43,7 @@ class CircuitBreaker:
 
     async def _get_redis_client(self) -> Any | None:
         """Returns cached async Redis client or None if unreachable."""
-        if self._redis_disabled:
+        if not settings.USE_REDIS or self._redis_disabled:
             return None
         try:
             loop = asyncio.get_running_loop()

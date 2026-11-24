@@ -23,6 +23,8 @@ def _input_key(run_id: str) -> str:
 
 
 async def _redis() -> Any | None:
+    if not settings.USE_REDIS:
+        return None
     global _redis_client, _redis_loop
     try:
         import asyncio
@@ -56,9 +58,6 @@ async def enqueue_pointer_event(
     client_width: float,
     client_height: float,
 ) -> bool:
-    client = await _redis()
-    if not client:
-        return False
     payload = {
         "action": (action or "click").lower(),
         "x": float(x),
@@ -66,6 +65,13 @@ async def enqueue_pointer_event(
         "client_width": max(1.0, float(client_width)),
         "client_height": max(1.0, float(client_height)),
     }
+    from app.workers.inprocess_ipc import enqueue_live_input, use_inprocess_ipc
+
+    if use_inprocess_ipc():
+        return await enqueue_live_input(str(run_id), json.dumps(payload), _MAX_QUEUE)
+    client = await _redis()
+    if not client:
+        return False
     key = _input_key(str(run_id))
     try:
         await client.lpush(key, json.dumps(payload))
@@ -158,23 +164,34 @@ async def _perform_viewport_click(page: Page, px: int, py: int) -> None:
 
 async def apply_pending_live_inputs(page: Page, run_id: str) -> int:
     """Drain queued UI clicks onto the worker Playwright page (viewport coordinates)."""
-    client = await _redis()
-    if not client or page.is_closed():
+    if page.is_closed():
         return 0
-    key = _input_key(str(run_id))
+    from app.workers.inprocess_ipc import drain_live_input, use_inprocess_ipc
+
     applied = 0
     try:
         vp = page.viewport_size or {"width": 1280, "height": 800}
         vw = int(vp.get("width") or 1280)
         vh = int(vp.get("height") or 800)
-        while applied < _MAX_QUEUE:
-            raw = await client.rpop(key)
-            if not raw:
+        if use_inprocess_ipc():
+            pending = await drain_live_input(str(run_id))
+        else:
+            client = await _redis()
+            if not client:
+                return 0
+            key = _input_key(str(run_id))
+            pending = []
+            while len(pending) < _MAX_QUEUE:
+                raw = await client.rpop(key)
+                if not raw:
+                    break
+                try:
+                    pending.append(json.loads(raw))
+                except Exception:
+                    continue
+        for data in pending:
+            if applied >= _MAX_QUEUE:
                 break
-            try:
-                data = json.loads(raw)
-            except Exception:
-                continue
             action = str(data.get("action") or "click").lower()
             cw = max(1.0, float(data.get("client_width") or vw))
             ch = max(1.0, float(data.get("client_height") or vh))

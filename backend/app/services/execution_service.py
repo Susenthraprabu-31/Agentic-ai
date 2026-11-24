@@ -149,25 +149,38 @@ class ExecutionService:
         except Exception:
             pass
 
-        # 5. Dispatch to Celery background worker
-        task_id = None
-        try:
-            from app.tasks.execution_tasks import execute_workflow_run
+        # 5. Dispatch to background worker (local job runner or Celery)
+        from app.core.config import settings
 
-            async_res = execute_workflow_run.delay(str(run.id))
-            task_id = str(async_res.id) if async_res and hasattr(async_res, "id") else None
-            run.celery_task_id = task_id
-            run.status = RunStatus.QUEUED.value
+        task_id = None
+        run.status = RunStatus.QUEUED.value
+        if settings.JOB_RUNNER_ENABLED:
+            run.celery_task_id = f"local:{run.id}"
             await self.db.commit()
             await self.db.refresh(run)
-        except Exception as exc:
-            logger.warning(
-                "Celery broker dispatch unavailable (%s). Execution %s queued for manual or worker execution.",
-                exc,
-                run.id,
-            )
-            # Retain PENDING/QUEUED state
-            run.status = RunStatus.QUEUED.value
+            try:
+                from app.workers.job_runner import notify_job_runner
+
+                notify_job_runner()
+            except Exception as exc:
+                logger.warning("Could not notify local job runner: %s", exc)
+        elif settings.CELERY_ENABLED:
+            try:
+                from app.tasks.execution_tasks import execute_workflow_run
+
+                async_res = execute_workflow_run.delay(str(run.id))
+                task_id = str(async_res.id) if async_res and hasattr(async_res, "id") else None
+                run.celery_task_id = task_id
+                await self.db.commit()
+                await self.db.refresh(run)
+            except Exception as exc:
+                logger.warning(
+                    "Celery broker dispatch unavailable (%s). Execution %s left queued.",
+                    exc,
+                    run.id,
+                )
+                await self.db.commit()
+        else:
             await self.db.commit()
 
         # Re-fetch with relations

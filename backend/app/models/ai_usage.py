@@ -3,8 +3,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Enum, ForeignKey, Integer, Numeric, String, text
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -30,7 +29,8 @@ class AIUsageLog(Base):
         ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     provider: Mapped[AIProvider] = mapped_column(
-        Enum(AIProvider, name="ai_provider"), nullable=False
+        Enum(AIProvider, name="ai_provider", native_enum=False, length=32),
+        nullable=False,
     )
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     operation: Mapped[str] = mapped_column(String(255), nullable=False)

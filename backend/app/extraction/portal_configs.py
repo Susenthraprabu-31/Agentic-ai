@@ -6,7 +6,7 @@ from typing import Optional
 
 COLLIER_SEARCH_URL = "https://www.collierappraiser.com/Main_Search/search_rp.html"
 COLLIER_HOME_URL = "https://www.collierappraiser.com/"
-MIAMI_DADE_SEARCH_URL = "https://apps.miamidade.gov/PropertySearch/#/"
+MIAMI_DADE_SEARCH_URL = "https://apps.miamidade-pa.gov/propertysearch/#/"
 ORANGE_SEARCH_URL = "https://ocpaweb.ocpafl.org/parcelsearch"
 BREVARD_SEARCH_URL = "https://www.bcpao.us/propertysearch/#/nav/search"
 
@@ -80,7 +80,16 @@ def format_miami_dade_address_for_search(address: str) -> str:
 
 def is_miami_dade_assessor(url: str) -> bool:
     lower = url.lower()
-    return ("miamidadepa.gov" in lower or "miamidade.gov" in lower) and "propertysearch" in lower
+    host_ok = any(
+        tok in lower
+        for tok in (
+            "miamidade-pa.gov",
+            "miamidadepa.gov",
+            "apps.miamidade.gov",
+            "miamidade.gov/propertysearch",
+        )
+    )
+    return host_ok and "propertysearch" in lower
 
 
 def is_collier_assessor(url: str) -> bool:

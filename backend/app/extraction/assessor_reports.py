@@ -213,12 +213,15 @@ async def download_universal_assessor_reports(
             capture_detail_screenshot_bytes,
             capture_property_detail_png_bytes,
             ensure_property_detail_workspace,
+            is_print_route_url,
             is_standalone_parcel_detail_url,
+            recover_from_print_route_page,
             render_assessor_detail_pdf_playwright,
             try_gis_official_document_downloads,
         )
 
         qv = query_value or effective_parcel
+        await recover_from_print_route_page(page, qv)
         out_docs: list[dict[str, Any]] = []
 
         from app.browser.property_capture_prep import pdf_bytes_looks_valid
@@ -255,22 +258,22 @@ async def download_universal_assessor_reports(
             saved_pdf = await render_assessor_detail_pdf_playwright(page, pdf_path, query_value=qv)
         else:
             await ensure_property_detail_workspace(page, qv)
-            if is_standalone_parcel_detail_url(page.url or ""):
-                png_bytes = await capture_detail_screenshot_bytes(page, query_value=qv)
-                if png_bytes and len(png_bytes) > 4000:
-                    png_path.write_bytes(png_bytes)
-                    logger.info(
-                        "Assessor card from standalone parcel detail screenshot (%d bytes)",
-                        len(png_bytes),
-                    )
-                    return [{
-                        "document_type": "Assessor Property Card",
-                        "document_title": f"Assessor Property Card - {clean_id}.png",
-                        "file_path": str(png_path),
-                        "source_url": page.url,
-                        "document_url": page.url,
-                        "mime_type": "image/png",
-                    }]
+            await recover_from_print_route_page(page, qv)
+            png_bytes = await capture_detail_screenshot_bytes(page, query_value=qv)
+            if png_bytes and len(png_bytes) > 4000:
+                png_path.write_bytes(png_bytes)
+                logger.info(
+                    "Assessor property card screenshot (%d bytes) — no native print dialog",
+                    len(png_bytes),
+                )
+                return [{
+                    "document_type": "Assessor Property Card",
+                    "document_title": f"Assessor Property Card - {clean_id}.png",
+                    "file_path": str(png_path),
+                    "source_url": page.url,
+                    "document_url": page.url,
+                    "mime_type": "image/png",
+                }]
             saved_pdf = await capture_assessor_pdf_best_effort(
                 page, pdf_path, query_value=qv
             )
@@ -304,6 +307,20 @@ async def download_universal_assessor_reports(
                 "mime_type": "image/png",
             }]
         if not wrote:
+            if is_print_route_url(page.url or ""):
+                await recover_from_print_route_page(page, qv)
+                png_bytes = await capture_detail_screenshot_bytes(page, query_value=qv)
+                if png_bytes and len(png_bytes) > 4000:
+                    png_path.write_bytes(png_bytes)
+                    return [{
+                        "document_type": "Assessor Property Card",
+                        "document_title": f"Assessor Property Card - {clean_id}.png",
+                        "file_path": str(png_path),
+                        "source_url": page.url,
+                        "document_url": page.url,
+                        "mime_type": "image/png",
+                    }]
+                return []
             try:
                 body_text = (await page.locator("body").inner_text(timeout=4000))[:2000]
                 if DISCLAIMER_HINT.search(body_text):

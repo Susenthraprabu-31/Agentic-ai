@@ -1,0 +1,1 @@
+"""Local background workers for desktop mode (replaces Celery on customer PCs)."""

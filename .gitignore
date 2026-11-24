@@ -10,7 +10,10 @@
 *.env
 
 # Local storage, scratch files, and reference dumps
+local_data/
 storage/
+dist-desktop/
+desktop/.dev-backend-port
 scratch/
 tmp/
 dono-mvp/

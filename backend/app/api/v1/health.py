@@ -15,9 +15,9 @@ router = APIRouter(prefix="/health", tags=["health"])
 logger = get_logger(__name__)
 
 
-@router.get("/live", response_model=LivenessResponse, summary="Liveness probe")
+@router.api_route("/live", methods=["GET", "HEAD"], response_model=LivenessResponse, summary="Liveness probe")
 async def liveness() -> LivenessResponse:
-    """Kubernetes/Docker liveness probe — returns 200 if the process is alive."""
+    """Liveness probe — GET/HEAD return 200 if the process is alive (wait-on uses HEAD)."""
     return LivenessResponse(status="ok")
 
 
@@ -62,8 +62,12 @@ async def _check_redis() -> str:
 
 async def _build_health_response(db: AsyncSession) -> HealthResponse:
     db_status = await _check_db(db)
-    redis_status = await _check_redis()
-    overall = "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
+    if settings.USE_REDIS:
+        redis_status = await _check_redis()
+    else:
+        redis_status = "skipped"
+    redis_ok = redis_status in ("ok", "skipped")
+    overall = "ok" if db_status == "ok" and redis_ok else "degraded"
     return HealthResponse(
         status=overall,
         version=settings.APP_VERSION,

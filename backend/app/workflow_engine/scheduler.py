@@ -4,7 +4,10 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import update
+
 from app.core.logging import get_logger
+from app.models.execution import WorkflowRun
 from app.workflow_engine.dependency_resolver import DependencyResolver
 from app.workflow_engine.execution_context import ExecutionContext, NodeExecutionResult
 from app.workflow_engine.node_executor import get_node_executor
@@ -27,6 +30,21 @@ class WorkflowScheduler:
         self.context = context
         self.resolver = DependencyResolver(context.definition)
 
+    async def _touch_workflow_run_heartbeat(self) -> None:
+        """Keep WorkflowRun.last_heartbeat fresh during long browser nodes (orphan recovery guard)."""
+        session = self.context.db_session
+        if not session:
+            return
+        try:
+            await session.execute(
+                update(WorkflowRun)
+                .where(WorkflowRun.id == self.context.run_id)
+                .values(last_heartbeat_at=datetime.now(timezone.utc))
+            )
+            await session.commit()
+        except Exception as exc:
+            logger.debug("Workflow run heartbeat touch failed: %s", exc)
+
     async def execute_node(self, node: dict[str, Any]) -> NodeExecutionResult:
         """Executes a single node or skips it if prerequisites are unsatisfied."""
         node_id = str(node.get("id", ""))
@@ -43,6 +61,7 @@ class WorkflowScheduler:
             )
 
         await self.context.refresh_cancellation()
+        await self._touch_workflow_run_heartbeat()
 
         # 1. Cancellation check
         if self.context.is_cancelled:
@@ -90,6 +109,7 @@ class WorkflowScheduler:
 
         for wave_idx, wave in enumerate(waves):
             await self.context.refresh_cancellation()
+            await self._touch_workflow_run_heartbeat()
             if self.context.is_cancelled:
                 # Cancel remaining nodes in subsequent waves
                 for node in wave:

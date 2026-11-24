@@ -11,6 +11,11 @@ from app.extraction.tax_collector_reports import (
     record_has_tax_collector_identity,
     _unique_tax_years_sorted_desc,
     years_from_account_history,
+    sanitize_tax_results_list_url,
+    tax_search_result_link_matches_query,
+    _dedupe_tax_search_targets_by_year,
+    body_shows_visualgov_tax_year_table,
+    tax_search_results_same_document_state,
 )
 from app.browser.page_search_ai import build_search_fills
 from app.models.document_artifact import DocumentArtifact, DocumentStatus
@@ -71,6 +76,51 @@ def test_record_has_tax_collector_identity():
     assert record_has_tax_collector_identity({"owner_name": "MARIA C MARRERO", "account_number": "30-4009-096-0060"})
     assert not record_has_tax_collector_identity({"owner_name": "OWNER OF RECORD"})
     assert not record_has_tax_collector_identity(None)
+
+
+def test_tax_search_results_same_document_state():
+    assert tax_search_results_same_document_state(
+        "https://www.washingtoncountytaxcollector.com/Property/SearchSelect?Accept=true"
+    )
+    assert not tax_search_results_same_document_state(
+        "https://county-taxes.net/fl-example/property-tax/account/123"
+    )
+
+
+def test_body_shows_visualgov_tax_year_table():
+    parcel = "00000000-00-0001-0025"
+    body = (
+        "Search Selection\n14 records found\n"
+        "TO VIEW OR PAY A TAX BILL CLICK THE PROPERTY NUMBER BELOW!\n"
+        f"R - {parcel} - 2024\nR - {parcel} - 2025\n"
+    )
+    assert body_shows_visualgov_tax_year_table(body, parcel)
+    assert not body_shows_visualgov_tax_year_table("Property Search form only", parcel)
+
+
+def test_sanitize_tax_results_list_url():
+    assert sanitize_tax_results_list_url(
+        "https://www.washingtoncountytaxcollector.com/Property/Search#true#0"
+    ) == "https://www.washingtoncountytaxcollector.com/Property/Search"
+    assert sanitize_tax_results_list_url("https://example.com/list") == "https://example.com/list"
+
+
+def test_tax_search_result_link_matches_washington_rows():
+    parcel = "00000000-00-0001-0022"
+    row = f"R - {parcel} - 2025"
+    assert tax_search_result_link_matches_query(row, parcel)
+    assert tax_search_result_link_matches_query(f"R - {parcel} - 2024", parcel)
+
+
+def test_dedupe_tax_search_targets_picks_two_most_recent_years():
+    rows = [
+        {"year": "2025", "text": "R - x - 2025"},
+        {"year": "2024", "text": "R - x - 2024"},
+        {"year": "2024", "text": "R - x - 2024 dup"},
+        {"year": "2023", "text": "R - x - 2023"},
+    ]
+    recent = _dedupe_tax_search_targets_by_year(rows)[:2]
+    assert [r["year"] for r in recent] == ["2025", "2024"]
 
 
 def test_tax_year_index_helpers():
